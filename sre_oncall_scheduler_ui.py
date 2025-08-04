@@ -26,6 +26,10 @@ class OnCallScheduler:
         self.pto_dates = defaultdict(set)  # user -> set of dates
         self.upgrade_rotation_queue = []  # Track upgrade rotation
         self.last_upgrade_user = None  # Track last scheduled upgrade user
+        self.tier3_morning_rotation_queue = []  # Track tier3 morning rotation
+        self.last_tier3_morning_user = None  # Track last scheduled tier3 morning user
+        self.tier3_evening_rotation_queue = []  # Track tier3 evening rotation
+        self.last_tier3_evening_user = None  # Track last scheduled tier3 evening user
         
         # Define shifts
         self.shifts = {
@@ -89,9 +93,15 @@ class OnCallScheduler:
         # Track daily assignments to prevent overlaps
         daily_assignments = defaultdict(set)  # date -> set of users
         
-        # Initialize upgrade rotation queue with all upgrade users
+        # Initialize rotation queues
         self.upgrade_rotation_queue = self.upgrade_users.copy()
         random.shuffle(self.upgrade_rotation_queue)
+        
+        self.tier3_morning_rotation_queue = self.tier3_users.copy()
+        random.shuffle(self.tier3_morning_rotation_queue)
+        
+        self.tier3_evening_rotation_queue = self.tier3_users.copy()
+        random.shuffle(self.tier3_evening_rotation_queue)
         
         # Get all weeks for the month
         weeks = self.get_month_weeks(year, month)
@@ -99,7 +109,11 @@ class OnCallScheduler:
         # Generate for each week
         for week_start, week_end in weeks:
             # Assign upgrade shift (one person for entire week)
-            upgrade_user = self.assign_upgrade_shift_with_rotation(week_start, daily_assignments)
+            upgrade_user = self.assign_weekly_shift_with_rotation(
+                'upgrade', week_start, daily_assignments, 
+                self.upgrade_rotation_queue, self.last_upgrade_user,
+                self.upgrade_users
+            )
             if upgrade_user:
                 current = week_start
                 while current <= week_end:
@@ -108,33 +122,57 @@ class OnCallScheduler:
                     current += datetime.timedelta(days=1)
                 self.last_upgrade_user = upgrade_user
             
-            # Assign tier2 and tier3 shifts for each day
+            # Assign tier3 weekly shifts
+            # Morning shift
+            tier3_morning_user = self.assign_weekly_shift_with_rotation(
+                'tier3_morning', week_start, daily_assignments,
+                self.tier3_morning_rotation_queue, self.last_tier3_morning_user,
+                self.tier3_users
+            )
+            if tier3_morning_user:
+                current = week_start
+                while current <= week_end:
+                    schedule[current]['tier3']['morning'] = tier3_morning_user
+                    daily_assignments[current].add(tier3_morning_user)
+                    current += datetime.timedelta(days=1)
+                self.last_tier3_morning_user = tier3_morning_user
+            
+            # Evening shift
+            tier3_evening_user = self.assign_weekly_shift_with_rotation(
+                'tier3_evening', week_start, daily_assignments,
+                self.tier3_evening_rotation_queue, self.last_tier3_evening_user,
+                self.tier3_users
+            )
+            if tier3_evening_user:
+                current = week_start
+                while current <= week_end:
+                    schedule[current]['tier3']['evening'] = tier3_evening_user
+                    daily_assignments[current].add(tier3_evening_user)
+                    current += datetime.timedelta(days=1)
+                self.last_tier3_evening_user = tier3_evening_user
+            
+            # Assign tier2 daily shifts
             current = week_start
             while current <= week_end:
-                # Tier2 shifts
                 self.assign_daily_shifts('tier2', current, self.tier2_users, 
                                        schedule, daily_assignments)
-                
-                # Tier3 shifts
-                self.assign_daily_shifts('tier3', current, self.tier3_users, 
-                                       schedule, daily_assignments)
-                
                 current += datetime.timedelta(days=1)
         
         return schedule
     
-    def assign_upgrade_shift_with_rotation(self, week_start: datetime.date, 
-                                         daily_assignments: Dict) -> str:
-        """Assign upgrade shift with fair rotation - no back-to-back weeks"""
+    def assign_weekly_shift_with_rotation(self, shift_type: str, week_start: datetime.date, 
+                                         daily_assignments: Dict, rotation_queue: List[str],
+                                         last_user: str, all_users: List[str]) -> str:
+        """Assign weekly shift with fair rotation - no back-to-back weeks"""
         # First, try to find someone from the rotation queue who:
         # 1. Is available for the entire week
         # 2. Wasn't scheduled last week (no back-to-back)
         # 3. Hasn't been scheduled yet in this rotation
         
         available_from_queue = []
-        for user in self.upgrade_rotation_queue:
+        for user in rotation_queue:
             # Skip if this user was scheduled last week
-            if user == self.last_upgrade_user:
+            if user == last_user:
                 continue
                 
             # Check if user is available for entire week
@@ -151,23 +189,23 @@ class OnCallScheduler:
         # If we found someone from the queue, use them
         if available_from_queue:
             selected_user = available_from_queue[0]
-            self.upgrade_rotation_queue.remove(selected_user)
+            rotation_queue.remove(selected_user)
             
             # If queue is empty, refill it (new rotation cycle)
-            if not self.upgrade_rotation_queue:
-                self.upgrade_rotation_queue = self.upgrade_users.copy()
+            if not rotation_queue:
+                rotation_queue.extend(all_users)
                 # Remove the just-scheduled user to avoid immediate repeat
-                if selected_user in self.upgrade_rotation_queue:
-                    self.upgrade_rotation_queue.remove(selected_user)
-                random.shuffle(self.upgrade_rotation_queue)
+                if selected_user in rotation_queue:
+                    rotation_queue.remove(selected_user)
+                random.shuffle(rotation_queue)
             
             return selected_user
         
         # If no one from queue is available, try anyone except last week's person
         all_available = []
-        for user in self.upgrade_users:
+        for user in all_users:
             # Skip if this user was scheduled last week
-            if user == self.last_upgrade_user:
+            if user == last_user:
                 continue
                 
             available_all_week = True
@@ -183,25 +221,25 @@ class OnCallScheduler:
         if all_available:
             selected_user = random.choice(all_available)
             # Update queue to reflect this choice
-            if selected_user in self.upgrade_rotation_queue:
-                self.upgrade_rotation_queue.remove(selected_user)
+            if selected_user in rotation_queue:
+                rotation_queue.remove(selected_user)
             return selected_user
         
         # Last resort: if no one else is available, allow last week's person
-        if self.last_upgrade_user and self.last_upgrade_user in self.upgrade_users:
+        if last_user and last_user in all_users:
             available_all_week = True
             for day in range(7):
                 date = week_start + datetime.timedelta(days=day)
-                if not self.is_user_available(self.last_upgrade_user, date) or \
-                   self.last_upgrade_user in daily_assignments[date]:
+                if not self.is_user_available(last_user, date) or \
+                   last_user in daily_assignments[date]:
                     available_all_week = False
                     break
             
             if available_all_week:
-                print(f"Warning: {self.last_upgrade_user} scheduled for back-to-back upgrade weeks due to availability constraints")
-                return self.last_upgrade_user
+                print(f"Warning: {last_user} scheduled for back-to-back {shift_type} weeks due to availability constraints")
+                return last_user
         
-        print(f"Warning: No available users for upgrade shift week of {week_start}")
+        print(f"Warning: No available users for {shift_type} shift week of {week_start}")
         return None
     
     def assign_upgrade_shift(self, week_start: datetime.date, 
