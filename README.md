@@ -6,14 +6,14 @@ A web-based tool for generating fair and constraint-aware on-call schedules for 
 
 - **Three Schedule Types**:
   - **Tier 2**: Two daily shifts (11am-5pm EST and 5pm-11pm EST)
-  - **Tier 3**: Two daily shifts (11am-5pm EST and 5pm-11pm EST)
+  - **Tier 3**: Two weekly shifts (11am-5pm EST and 5pm-11pm EST, Monday-Sunday)
   - **Upgrade**: One weekly shift (12pm-8:30pm EST, Monday-Sunday)
 
 - **Smart Scheduling Constraints**:
   - No user has overlapping shifts across schedules
   - No user works more than 1 shift per day
-  - Upgrade shifts have fair rotation with no back-to-back weeks
-  - All upgrade users must get a turn before anyone repeats
+  - Weekly shifts (Tier 3 and Upgrade) have fair rotation with no back-to-back weeks
+  - All weekly shift users must get a turn before anyone repeats
 
 - **User-Friendly Web Interface**:
   - File browser for easy user list upload
@@ -110,25 +110,31 @@ lisa
 
 ## Schedule Logic
 
-### Daily Shifts (Tier 2 & Tier 3)
+### Daily Shifts (Tier 2 Only)
 - Morning shift: 11am-5pm EST
 - Evening shift: 5pm-11pm EST
-- Different users are assigned to morning and evening shifts
+- Different users are assigned to morning and evening shifts each day
 - Random assignment among available users
 
-### Weekly Upgrade Shifts
-- Full shift: 12pm-8:30pm EST (Monday-Sunday)
+### Weekly Shifts (Tier 3 & Upgrade)
+**Tier 3 Shifts**:
+- Morning shift: 11am-5pm EST (Monday-Sunday)
+- Evening shift: 5pm-11pm EST (Monday-Sunday)
 - **Fair Rotation Rules**:
   1. No back-to-back weeks for the same user
   2. All users must get one assignment before anyone repeats
-  3. Maintains a rotation queue to ensure fairness
+  3. Separate rotation queues for morning and evening shifts
   4. Only breaks these rules if PTO makes it impossible
+
+**Upgrade Shift**:
+- Full shift: 12pm-8:30pm EST (Monday-Sunday)
+- Same fair rotation rules as Tier 3
 
 ### Conflict Resolution
 - The system automatically handles conflicts when users have:
   - PTO dates
   - Existing assignments on other tiers
-  - Back-to-back upgrade shifts
+  - Back-to-back weekly shifts
 
 ## Visual Interface
 
@@ -170,9 +176,10 @@ Date,Day,Schedule,Shift,Time,User
 - Check that enough users are available (not all on PTO)
 - Ensure no typos in PTO date ranges
 
-### Back-to-back upgrade warnings
-- This occurs when PTO constraints make fair rotation impossible
+### Back-to-back warnings
+- This occurs when PTO constraints make fair rotation impossible for weekly shifts
 - The system will display warnings in the server console
+- Warnings specify which shift type (tier3_morning, tier3_evening, or upgrade)
 - Review PTO assignments if this happens frequently
 
 ## Server Output
@@ -193,5 +200,7 @@ Press `Ctrl+C` in the terminal to stop the Flask server.
 
 - The scheduler handles months that span multiple weeks (e.g., if the 1st isn't a Monday)
 - All times are in EST
-- The system uses random selection among equally qualified candidates
+- Tier 2 uses daily rotation with random selection among available candidates
+- Tier 3 and Upgrade use weekly rotation with fair distribution
 - PTO takes precedence over fair rotation rules
+- Weekly shifts run Monday through Sunday
