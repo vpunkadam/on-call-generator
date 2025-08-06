@@ -951,12 +951,12 @@ def export():
 
 def open_browser():
     time.sleep(1)
-    webbrowser.open('http://localhost:5000')
+    webbrowser.open('http://127.0.0.1:5000')
 
 if __name__ == "__main__":
     print("=== SRE On-Call Schedule Generator ===")
     print("\nStarting web interface...")
-    print("Opening browser to http://localhost:5000")
+    print("Opening browser to http://127.0.0.1:5000")
     print("\nPress Ctrl+C to stop the server\n")
     
     # Open browser automatically
