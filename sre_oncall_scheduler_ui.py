@@ -495,7 +495,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         
         <div id="calendar" class="calendar"></div>
         
-        <button class="export-btn" onclick="exportSchedule()" style="display: none;">Export to CSV</button>
+        <button class="export-btn" onclick="exportSchedule()" style="display: none;">Export to Excel</button>
     </div>
     
     <script>
@@ -759,7 +759,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `oncall_schedule_${currentSchedule.month}_${currentSchedule.year}.csv`;
+                a.download = `oncall_schedule_${currentSchedule.month}_${currentSchedule.year}.xlsx`;
                 document.body.appendChild(a);
                 a.click();
                 window.URL.revokeObjectURL(url);
@@ -915,13 +915,34 @@ def export():
     data = request.json
     schedule_data = data['schedule']
     
-    import csv
+    # Create an Excel file with multiple sheets instead of CSV
     import io
+    import xlsxwriter
     
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['Date', 'Day', 'Schedule', 'Shift', 'Time', 'User'])
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     
+    # Create formats
+    header_format = workbook.add_format({
+        'bold': True,
+        'bg_color': '#D3D3D3',
+        'border': 1
+    })
+    
+    tier2_format = workbook.add_format({'bg_color': '#E3F2FD'})
+    tier3_format = workbook.add_format({'bg_color': '#F3E5F5'})
+    upgrade_format = workbook.add_format({'bg_color': '#E8F5E9'})
+    
+    # Main schedule sheet
+    main_sheet = workbook.add_worksheet('Full Schedule')
+    headers = ['Date', 'Day', 'Schedule', 'Shift', 'Time', 'User']
+    for col, header in enumerate(headers):
+        main_sheet.write(0, col, header, header_format)
+    
+    # Collect user assignments for individual sheets
+    user_assignments = defaultdict(list)
+    
+    row = 1
     for date_str, day_schedule in sorted(schedule_data.items()):
         date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
         day_name = date.strftime('%A')
@@ -930,33 +951,139 @@ def export():
             if tier in day_schedule:
                 if tier == 'upgrade':
                     if 'full' in day_schedule[tier]:
-                        writer.writerow([date_str, day_name, tier, 'full', 
-                                       '12:00pm-8:30pm EST', 
-                                       day_schedule[tier]['full']])
+                        user = day_schedule[tier]['full']
+                        time_range = '12:00pm-8:30pm EST'
+                        shift_type = 'full'
+                        
+                        # Write to main sheet
+                        main_sheet.write(row, 0, date_str)
+                        main_sheet.write(row, 1, day_name)
+                        main_sheet.write(row, 2, tier, upgrade_format)
+                        main_sheet.write(row, 3, shift_type)
+                        main_sheet.write(row, 4, time_range)
+                        main_sheet.write(row, 5, user)
+                        row += 1
+                        
+                        # Collect for user sheet
+                        user_assignments[user].append({
+                            'date': date_str,
+                            'day': day_name,
+                            'schedule': tier,
+                            'shift': shift_type,
+                            'time': time_range
+                        })
                 else:
                     if 'morning' in day_schedule[tier]:
-                        writer.writerow([date_str, day_name, tier, 'morning', 
-                                       '11:00am-5:00pm EST', 
-                                       day_schedule[tier]['morning']])
+                        user = day_schedule[tier]['morning']
+                        time_range = '11:00am-5:00pm EST'
+                        shift_type = 'morning'
+                        
+                        # Write to main sheet
+                        format_to_use = tier2_format if tier == 'tier2' else tier3_format
+                        main_sheet.write(row, 0, date_str)
+                        main_sheet.write(row, 1, day_name)
+                        main_sheet.write(row, 2, tier, format_to_use)
+                        main_sheet.write(row, 3, shift_type)
+                        main_sheet.write(row, 4, time_range)
+                        main_sheet.write(row, 5, user)
+                        row += 1
+                        
+                        # Collect for user sheet
+                        user_assignments[user].append({
+                            'date': date_str,
+                            'day': day_name,
+                            'schedule': tier,
+                            'shift': shift_type,
+                            'time': time_range
+                        })
+                        
                     if 'evening' in day_schedule[tier]:
-                        writer.writerow([date_str, day_name, tier, 'evening', 
-                                       '5:00pm-11:00pm EST', 
-                                       day_schedule[tier]['evening']])
+                        user = day_schedule[tier]['evening']
+                        time_range = '5:00pm-11:00pm EST'
+                        shift_type = 'evening'
+                        
+                        # Write to main sheet
+                        format_to_use = tier2_format if tier == 'tier2' else tier3_format
+                        main_sheet.write(row, 0, date_str)
+                        main_sheet.write(row, 1, day_name)
+                        main_sheet.write(row, 2, tier, format_to_use)
+                        main_sheet.write(row, 3, shift_type)
+                        main_sheet.write(row, 4, time_range)
+                        main_sheet.write(row, 5, user)
+                        row += 1
+                        
+                        # Collect for user sheet
+                        user_assignments[user].append({
+                            'date': date_str,
+                            'day': day_name,
+                            'schedule': tier,
+                            'shift': shift_type,
+                            'time': time_range
+                        })
     
+    # Autofit columns on main sheet
+    main_sheet.set_column(0, 0, 12)  # Date
+    main_sheet.set_column(1, 1, 10)  # Day
+    main_sheet.set_column(2, 2, 10)  # Schedule
+    main_sheet.set_column(3, 3, 10)  # Shift
+    main_sheet.set_column(4, 4, 20)  # Time
+    main_sheet.set_column(5, 5, 15)  # User
+    
+    # Create individual user sheets
+    for user in sorted(user_assignments.keys()):
+        # Clean sheet name (Excel has restrictions)
+        sheet_name = user[:31]  # Excel max sheet name is 31 chars
+        user_sheet = workbook.add_worksheet(sheet_name)
+        
+        # Headers
+        user_headers = ['Date', 'Day', 'Schedule', 'Shift', 'Time']
+        for col, header in enumerate(user_headers):
+            user_sheet.write(0, col, header, header_format)
+        
+        # User's assignments
+        assignments = sorted(user_assignments[user], key=lambda x: x['date'])
+        for row_num, assignment in enumerate(assignments, 1):
+            # Determine format based on schedule type
+            if assignment['schedule'] == 'tier2':
+                row_format = tier2_format
+            elif assignment['schedule'] == 'tier3':
+                row_format = tier3_format
+            else:
+                row_format = upgrade_format
+            
+            user_sheet.write(row_num, 0, assignment['date'])
+            user_sheet.write(row_num, 1, assignment['day'])
+            user_sheet.write(row_num, 2, assignment['schedule'], row_format)
+            user_sheet.write(row_num, 3, assignment['shift'])
+            user_sheet.write(row_num, 4, assignment['time'])
+        
+        # Add summary at the top
+        user_sheet.write(row_num + 2, 0, 'Total Shifts:', header_format)
+        user_sheet.write(row_num + 2, 1, len(assignments))
+        
+        # Autofit columns
+        user_sheet.set_column(0, 0, 12)  # Date
+        user_sheet.set_column(1, 1, 10)  # Day
+        user_sheet.set_column(2, 2, 10)  # Schedule
+        user_sheet.set_column(3, 3, 10)  # Shift
+        user_sheet.set_column(4, 4, 20)  # Time
+    
+    workbook.close()
     output.seek(0)
+    
     return output.getvalue(), 200, {
-        'Content-Type': 'text/csv',
-        'Content-Disposition': 'attachment; filename=oncall_schedule.csv'
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': f'attachment; filename=oncall_schedule_{data["month"]}_{data["year"]}.xlsx'
     }
 
 def open_browser():
     time.sleep(1)
-    webbrowser.open('http://127.0.0.1:5000')
+    webbrowser.open('http://localhost:5000')
 
 if __name__ == "__main__":
     print("=== SRE On-Call Schedule Generator ===")
     print("\nStarting web interface...")
-    print("Opening browser to http://127.0.0.1:5000")
+    print("Opening browser to http://localhost:5000")
     print("\nPress Ctrl+C to stop the server\n")
     
     # Open browser automatically
