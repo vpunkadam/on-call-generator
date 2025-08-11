@@ -30,6 +30,7 @@ A web-based tool for generating fair and constraint-aware on-call schedules for 
 
 - Python 3.6 or higher
 - Flask web framework
+- XlsxWriter library (for Excel export)
 - macOS (or any OS with Python support)
 
 ## Installation
@@ -40,9 +41,9 @@ A web-based tool for generating fair and constraint-aware on-call schedules for 
    # or save the script to a file named sre_oncall_scheduler.py
    ```
 
-2. **Install Flask**:
+2. **Install required packages**:
    ```bash
-   pip install flask
+   pip install flask xlsxwriter
    ```
 
 3. **Make the script executable**:
@@ -105,8 +106,12 @@ lisa
    - The system will show which weeks are included in the schedule
 
 5. **Export Results**:
-   - Click "Export to CSV" to download the schedule
-   - The CSV includes all shift assignments with dates and times
+   - Click "Export to Excel" to download the schedule
+   - The Excel file includes:
+     - **Full Schedule** sheet with all assignments
+     - **Individual user sheets** showing only their shifts
+     - Color coding by tier (blue for Tier 2, purple for Tier 3, green for Upgrade)
+     - Total shift count for each user
 
 ## Schedule Logic
 
@@ -146,22 +151,29 @@ The web interface provides:
 - **Week-by-week view** with all 7 days displayed
 - **Clear labeling**: T2 AM/PM, T3 AM/PM, Upgrade
 
-## CSV Export Format
+## Excel Export Format
 
-The exported CSV includes:
-- Date
-- Day of week
-- Schedule tier (tier2/tier3/upgrade)
-- Shift type (morning/evening/full)
-- Time range
-- Assigned user
+The exported Excel file contains multiple sheets:
 
-Example:
-```csv
-Date,Day,Schedule,Shift,Time,User
-2024-03-01,Friday,tier2,morning,11:00am-5:00pm EST,alice
-2024-03-01,Friday,tier2,evening,5:00pm-11:00pm EST,bob
-2024-03-01,Friday,upgrade,full,12:00pm-8:30pm EST,ivan
+### Full Schedule Sheet
+- Complete view of all assignments
+- Color-coded rows by tier
+- Columns: Date, Day, Schedule, Shift, Time, User
+
+### Individual User Sheets
+- One sheet per user with only their assignments
+- Same color coding as the main sheet
+- Includes a summary of total shifts assigned
+- Makes it easy for users to see their upcoming on-call duties
+
+Example user sheet:
+```
+Date        Day       Schedule  Shift    Time
+2024-03-01  Friday    tier2     morning  11:00am-5:00pm EST
+2024-03-08  Friday    upgrade   full     12:00pm-8:30pm EST
+2024-03-15  Friday    tier3     evening  5:00pm-11:00pm EST
+
+Total Shifts: 3
 ```
 
 ## Troubleshooting
