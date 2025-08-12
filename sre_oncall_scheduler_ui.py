@@ -1,6 +1,3 @@
-
-Content is user-generated and unverified.
-1
 #!/usr/bin/env python3
 """
 SRE On-Call Schedule Generator with Web UI
