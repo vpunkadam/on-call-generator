@@ -1,218 +1,222 @@
 # SRE On-Call Schedule Generator
 
-A web-based tool for generating fair and constraint-aware on-call schedules for Site Reliability Engineering (SRE) teams. Features a visual calendar interface, automatic rotation management, and PTO handling.
+A Python-based web application for generating fair and balanced on-call schedules for Site Reliability Engineering (SRE) teams with multiple support tiers.
 
 ## Features
 
-- **Three Schedule Types**:
-  - **Tier 2**: Two daily shifts (11am-5pm EST and 5pm-11pm EST)
-  - **Tier 3**: Two weekly shifts (11am-5pm EST and 5pm-11pm EST, Monday-Sunday)
-  - **Upgrade**: One weekly shift (12pm-8:30pm EST, Monday-Sunday)
-
-- **Smart Scheduling Constraints**:
-  - No user has overlapping shifts across schedules
-  - No user works more than 1 shift per day
-  - Weekly shifts (Tier 3 and Upgrade) have fair rotation with no back-to-back weeks
-  - All weekly shift users must get a turn before anyone repeats
-
-- **User-Friendly Web Interface**:
-  - File browser for easy user list upload
-  - Checkbox-based PTO selection
-  - Visual calendar display with color-coded shifts
-  - CSV export functionality
-
-- **PTO Management**:
+- **Multi-Tier Support**: Manages three different on-call tiers:
+  - **Tier 2**: Daily shifts (morning and evening)
+  - **Tier 3**: Weekly shifts (morning and evening)
+  - **Upgrade**: Weekly full shifts
+  
+- **Fair Rotation Algorithm**: 
+  - Ensures equitable distribution of shifts among team members
+  - Prevents back-to-back weekly assignments
+  - Prioritizes users with fewer total shifts for tier 2 assignments
+  
+- **PTO Management**: 
   - Support for multiple PTO date ranges per user
-  - Visual interface for entering time off
-  - Automatic conflict resolution
+  - Automatically excludes users from scheduling during their time off
+  
+- **Web-Based Interface**: 
+  - Clean, intuitive UI for managing users and generating schedules
+  - Visual calendar display with color-coded shifts
+  - No installation required for end users - just open in browser
+  
+- **Excel Export**: 
+  - Comprehensive Excel workbook with multiple sheets
+  - Main schedule sheet with all assignments
+  - Individual sheets for each user showing their specific shifts
+  - Color-coded by tier for easy reading
 
-## Prerequisites
+## Shift Timings
 
-- Python 3.6 or higher
-- Flask web framework
-- XlsxWriter library (for Excel export)
-- macOS (or any OS with Python support)
+- **Tier 2 & Tier 3**:
+  - Morning: 11:00 AM - 5:00 PM EST
+  - Evening: 5:00 PM - 11:00 PM EST
+  
+- **Upgrade**:
+  - Full shift: 12:00 PM - 8:30 PM EST
+
+## Requirements
+
+- Python 3.6+
+- Flask
+- xlsxwriter
 
 ## Installation
 
-1. **Clone or download the script**:
-   ```bash
-   wget sre_oncall_scheduler.py
-   # or save the script to a file named sre_oncall_scheduler.py
-   ```
-
-2. **Install required packages**:
-   ```bash
-   pip install flask xlsxwriter
-   ```
-
-3. **Make the script executable**:
-   ```bash
-   chmod +x sre_oncall_scheduler.py
-   ```
-
-## User File Format
-
-Create text files for each tier with one username per line:
-
-**tier2_users.txt**:
-```
-alice
-bob
-charlie
-david
-```
-
-**tier3_users.txt**:
-```
-eve
-frank
-grace
-henry
-```
-
-**upgrade_users.txt**:
-```
-ivan
-julia
-kevin
-lisa
+1. Clone or download the script
+2. Install required dependencies:
+```bash
+pip install flask xlsxwriter
 ```
 
 ## Usage
 
-1. **Start the application**:
-   ```bash
-   ./sre_oncall_scheduler.py
-   ```
-   The web interface will automatically open in your default browser at `http://localhost:5000`
+### Starting the Application
 
-2. **Load user files**:
-   - Click "Choose File" next to each tier
-   - Browse and select your text files
-   - You'll see a green checkmark with the number of users loaded
-
-3. **Configure PTO (Optional)**:
-   - Check the boxes next to users who need time off
-   - Enter date ranges in the format: `DD/MM/YYYY-DD/MM/YYYY`
-   - Multiple ranges can be entered separated by commas:
-     ```
-     01/03/2024-05/03/2024, 15/03/2024-20/03/2024
-     ```
-
-4. **Generate Schedule**:
-   - Enter the month in `MM/YYYY` format (e.g., `03/2024`)
-   - Click "Generate Schedule"
-   - The system will show which weeks are included in the schedule
-
-5. **Export Results**:
-   - Click "Export to Excel" to download the schedule
-   - The Excel file includes:
-     - **Full Schedule** sheet with all assignments
-     - **Individual user sheets** showing only their shifts
-     - Color coding by tier (blue for Tier 2, purple for Tier 3, green for Upgrade)
-     - Total shift count for each user
-
-## Schedule Logic
-
-### Daily Shifts (Tier 2 Only)
-- Morning shift: 11am-5pm EST
-- Evening shift: 5pm-11pm EST
-- Different users are assigned to morning and evening shifts each day
-- Random assignment among available users
-
-### Weekly Shifts (Tier 3 & Upgrade)
-**Tier 3 Shifts**:
-- Morning shift: 11am-5pm EST (Monday-Sunday)
-- Evening shift: 5pm-11pm EST (Monday-Sunday)
-- **Fair Rotation Rules**:
-  1. No back-to-back weeks for the same user
-  2. All users must get one assignment before anyone repeats
-  3. Separate rotation queues for morning and evening shifts
-  4. Only breaks these rules if PTO makes it impossible
-
-**Upgrade Shift**:
-- Full shift: 12pm-8:30pm EST (Monday-Sunday)
-- Same fair rotation rules as Tier 3
-
-### Conflict Resolution
-- The system automatically handles conflicts when users have:
-  - PTO dates
-  - Existing assignments on other tiers
-  - Back-to-back weekly shifts
-
-## Visual Interface
-
-The web interface provides:
-- **Color-coded shifts**:
-  - Blue: Tier 2 assignments
-  - Purple: Tier 3 assignments  
-  - Green: Upgrade assignments
-- **Week-by-week view** with all 7 days displayed
-- **Clear labeling**: T2 AM/PM, T3 AM/PM, Upgrade
-
-## Excel Export Format
-
-The exported Excel file contains multiple sheets:
-
-### Full Schedule Sheet
-- Complete view of all assignments
-- Color-coded rows by tier
-- Columns: Date, Day, Schedule, Shift, Time, User
-
-### Individual User Sheets
-- One sheet per user with only their assignments
-- Same color coding as the main sheet
-- Includes a summary of total shifts assigned
-- Makes it easy for users to see their upcoming on-call duties
-
-Example user sheet:
+Run the script from command line:
+```bash
+python oncall_scheduler.py
 ```
-Date        Day       Schedule  Shift    Time
-2024-03-01  Friday    tier2     morning  11:00am-5:00pm EST
-2024-03-08  Friday    upgrade   full     12:00pm-8:30pm EST
-2024-03-15  Friday    tier3     evening  5:00pm-11:00pm EST
 
-Total Shifts: 3
+The application will:
+1. Start a local web server on port 5000
+2. Automatically open your default browser to `http://localhost:5000`
+3. Display the web interface for schedule generation
+
+### Loading Users
+
+1. Create text files with user names (one per line) for each tier:
+   - `tier2_users.txt`
+   - `tier3_users.txt`
+   - `upgrade_users.txt`
+
+Example file format:
 ```
+john.doe
+jane.smith
+bob.wilson
+sarah.jones
+```
+
+2. In the web interface, use the file upload buttons to load users for each tier
+3. The interface will display the count of loaded users for confirmation
+
+### Setting PTO Dates
+
+1. After loading users, the PTO section will appear
+2. Check the box next to any user who will be on PTO
+3. Enter PTO date ranges in `DD/MM/YYYY-DD/MM/YYYY` format
+4. Multiple date ranges can be entered separated by commas
+
+Example:
+```
+01/03/2024-05/03/2024, 15/03/2024-20/03/2024
+```
+
+### Generating the Schedule
+
+1. Enter the target month in `MM/YYYY` format (e.g., `03/2024`)
+2. Click "Generate Schedule"
+3. The schedule will display in a visual calendar format
+4. Review the assignments for accuracy and fairness
+
+### Exporting to Excel
+
+1. After generating a schedule, click the "Export to Excel" button
+2. The download will include:
+   - Full schedule with all assignments
+   - Individual sheets for each user
+   - Color coding by tier
+   - Shift counts and summaries
+
+## Schedule Rules
+
+### Weekly Assignments (Tier 3 & Upgrade)
+- Users are assigned for entire weeks (Monday-Sunday)
+- No back-to-back week assignments (when possible)
+- Fair rotation ensures all users get equal opportunities
+
+### Daily Assignments (Tier 2)
+- Assigned on a per-day basis
+- Algorithm prioritizes users with fewer total shifts
+- Ensures balanced distribution across the month
+
+### Conflict Prevention
+- No user can have multiple shifts on the same day
+- PTO dates are strictly respected
+- System warns if constraints cannot be met
+
+## Fairness Report
+
+After generation, the console displays a fairness report showing:
+- Total shifts per user
+- Average shifts by tier
+- Distribution analysis
+
+This helps verify equitable scheduling and identify any imbalances.
 
 ## Troubleshooting
 
-### No users appear after file selection
-- Ensure the text files contain one username per line
-- Check the browser console (F12) for error messages
-- Verify the Flask server is running
+### Port Already in Use
+If port 5000 is already in use, modify the last line of the script:
+```python
+app.run(debug=False, port=5001)  # Change to any available port
+```
 
-### Schedule generation fails
-- Verify the month format is `MM/YYYY`
-- Check that enough users are available (not all on PTO)
-- Ensure no typos in PTO date ranges
+### File Upload Issues
+- Ensure text files are properly formatted (one name per line)
+- Remove any empty lines or special characters
+- Use UTF-8 encoding for files with special characters
 
-### Back-to-back warnings
-- This occurs when PTO constraints make fair rotation impossible for weekly shifts
-- The system will display warnings in the server console
-- Warnings specify which shift type (tier3_morning, tier3_evening, or upgrade)
-- Review PTO assignments if this happens frequently
+### Excel Export Not Working
+Ensure xlsxwriter is installed:
+```bash
+pip install --upgrade xlsxwriter
+```
 
-## Server Output
+### Schedule Generation Errors
+- Verify sufficient users are loaded for each tier
+- Check that PTO dates don't conflict with minimum staffing requirements
+- Review console output for specific error messages
 
-The Flask server will show:
-- Startup confirmation
-- File loading confirmations
-- Warnings about scheduling conflicts
-- Any errors that occur
+## Customization
 
-Keep the terminal window open to monitor these messages.
+### Modifying Shift Times
+Edit the shift definitions in the `__init__` method:
+```python
+self.shifts = {
+    'tier2': {
+        'morning': {'start': '11:00', 'end': '17:00', 'timezone': 'EST'},
+        'evening': {'start': '17:00', 'end': '23:00', 'timezone': 'EST'}
+    },
+    # ... modify as needed
+}
+```
 
-## Stopping the Server
+### Changing Rotation Logic
+The rotation algorithm can be customized in:
+- `assign_weekly_shift_with_rotation()` - For weekly assignments
+- `assign_daily_shifts_with_fairness()` - For daily assignments
 
-Press `Ctrl+C` in the terminal to stop the Flask server.
+### UI Customization
+The HTML template can be modified directly in the `HTML_TEMPLATE` variable for styling or layout changes.
 
-## Notes
+## Architecture
 
-- The scheduler handles months that span multiple weeks (e.g., if the 1st isn't a Monday)
-- All times are in EST
-- Tier 2 uses daily rotation with random selection among available candidates
-- Tier 3 and Upgrade use weekly rotation with fair distribution
-- PTO takes precedence over fair rotation rules
-- Weekly shifts run Monday through Sunday
+The application consists of:
+- **OnCallScheduler Class**: Core scheduling logic and algorithms
+- **Flask Web Server**: Handles HTTP requests and serves the UI
+- **HTML/JavaScript Frontend**: Interactive user interface
+- **RESTful API Endpoints**: Communication between frontend and backend
+
+## API Endpoints
+
+- `GET /` - Serves the main web interface
+- `POST /load_users_direct` - Loads users from uploaded files
+- `GET /get_all_users` - Returns all loaded users
+- `POST /generate` - Generates the schedule
+- `POST /export` - Creates and downloads Excel file
+
+## License
+
+This script is provided as-is for use in SRE team scheduling. Feel free to modify and adapt to your organization's needs.
+
+## Contributing
+
+Suggestions and improvements are welcome. Key areas for enhancement:
+- Integration with calendar systems (Google Calendar, Outlook)
+- Slack/email notifications
+- Historical schedule tracking
+- Preference-based scheduling
+- On-call swap management
+
+## Support
+
+For issues or questions:
+1. Check the console output for detailed error messages
+2. Verify all dependencies are installed correctly
+3. Ensure input files are properly formatted
+4. Review the fairness report for scheduling insights
