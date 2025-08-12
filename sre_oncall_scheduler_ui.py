@@ -297,6 +297,76 @@ class OnCallScheduler:
             schedule[date][tier]['morning'] = available_users[0]
             daily_assignments[date].add(available_users[0])
         # If no users available, leave empty
+    
+    def assign_daily_shifts_with_fairness(self, tier: str, date: datetime.date, 
+                                          users: List[str], schedule: Dict, 
+                                          daily_assignments: Dict):
+        """Assign morning and evening shifts for a tier with fairness consideration"""
+        # Get available users for this date
+        available_users = [u for u in users 
+                         if self.is_user_available(u, date) 
+                         and u not in daily_assignments[date]]
+        
+        if len(available_users) >= 2:
+            # Sort by shift count (ascending) to prioritize users with fewer shifts
+            available_users.sort(key=lambda u: self.shift_counts[u])
+            
+            # Assign the two users with the least shifts
+            schedule[date][tier]['morning'] = available_users[0]
+            schedule[date][tier]['evening'] = available_users[1]
+            daily_assignments[date].add(available_users[0])
+            daily_assignments[date].add(available_users[1])
+            
+            # Update shift counts
+            self.shift_counts[available_users[0]] += 1
+            self.shift_counts[available_users[1]] += 1
+            
+        elif len(available_users) == 1:
+            # Only one user available - assign to morning
+            schedule[date][tier]['morning'] = available_users[0]
+            daily_assignments[date].add(available_users[0])
+            self.shift_counts[available_users[0]] += 1
+        # If no users available, leave empty
+    
+    def print_fairness_report(self):
+        """Print a report showing shift distribution"""
+        if not self.shift_counts:
+            return
+        
+        print("\n=== Shift Distribution Report ===")
+        print(f"{'User':<20} {'Shifts':<10} {'Type'}")
+        print("-" * 40)
+        
+        # Separate by user type
+        tier2_counts = {u: self.shift_counts[u] for u in self.tier2_users if u in self.shift_counts}
+        tier3_counts = {u: self.shift_counts[u] for u in self.tier3_users if u in self.shift_counts}
+        upgrade_counts = {u: self.shift_counts[u] for u in self.upgrade_users if u in self.shift_counts}
+        
+        # Print Tier 2
+        if tier2_counts:
+            print("\nTier 2 Users:")
+            for user, count in sorted(tier2_counts.items(), key=lambda x: x[1], reverse=True):
+                print(f"{user:<20} {count:<10}")
+            avg = sum(tier2_counts.values()) / len(tier2_counts)
+            print(f"Average: {avg:.1f} shifts")
+        
+        # Print Tier 3
+        if tier3_counts:
+            print("\nTier 3 Users:")
+            for user, count in sorted(tier3_counts.items(), key=lambda x: x[1], reverse=True):
+                print(f"{user:<20} {count:<10}")
+            avg = sum(tier3_counts.values()) / len(tier3_counts)
+            print(f"Average: {avg:.1f} shifts")
+        
+        # Print Upgrade
+        if upgrade_counts:
+            print("\nUpgrade Users:")
+            for user, count in sorted(upgrade_counts.items(), key=lambda x: x[1], reverse=True):
+                print(f"{user:<20} {count:<10} (weekly)")
+            avg = sum(upgrade_counts.values()) / len(upgrade_counts)
+            print(f"Average: {avg:.1f} shifts")
+        
+        print("=" * 40)
 
 # Global scheduler instance
 scheduler = OnCallScheduler()
