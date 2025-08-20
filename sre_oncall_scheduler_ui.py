@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-SRE On-Call Schedule Generator with Web UI
+SRE On-Call Schedule Generator with Web UI - Enhanced with Prior Month Import
 Generates on-call schedules for tier2, tier3, and upgrade shifts
 """
 
 import datetime
 import random
 from collections import defaultdict
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Tuple, Set, Optional
 import json
 from flask import Flask, render_template_string, request, jsonify
 import webbrowser
@@ -32,6 +32,14 @@ class OnCallScheduler:
         self.last_tier3_evening_user = None  # Track last scheduled tier3 evening user
         self.shift_counts = defaultdict(int)  # Track total shifts per user
         
+        # Store prior month's last week assignments for continuity
+        self.prior_month_last_week = {
+            'upgrade': None,
+            'tier3_morning': None,
+            'tier3_evening': None,
+            'date': None  # To track when this was set
+        }
+        
         # Define shifts
         self.shifts = {
             'tier2': {
@@ -46,7 +54,89 @@ class OnCallScheduler:
                 'full': {'start': '12:00', 'end': '20:30', 'timezone': 'EST'}
             }
         }
+    
+    def import_prior_month_schedule(self, schedule_data: Dict) -> Dict:
+        """Import prior month's schedule and extract last week's assignments"""
+        result = {
+            'success': False,
+            'message': '',
+            'last_week_assignments': {}
+        }
         
+        try:
+            # Find the last week's assignments
+            if not schedule_data:
+                result['message'] = 'No schedule data provided'
+                return result
+            
+            # Convert schedule data and find the latest dates
+            dates = []
+            for date_str in schedule_data.keys():
+                try:
+                    date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+                    dates.append(date)
+                except:
+                    continue
+            
+            if not dates:
+                result['message'] = 'No valid dates found in schedule'
+                return result
+            
+            # Find the last Monday in the schedule
+            max_date = max(dates)
+            last_monday = max_date - datetime.timedelta(days=max_date.weekday())
+            
+            # Extract assignments from the last week
+            last_week_assignments = {
+                'upgrade': None,
+                'tier3_morning': None,
+                'tier3_evening': None,
+                'week_start': last_monday.strftime('%Y-%m-%d')
+            }
+            
+            # Look for assignments in the last week
+            for day_offset in range(7):
+                check_date = last_monday + datetime.timedelta(days=day_offset)
+                date_str = check_date.strftime('%Y-%m-%d')
+                
+                if date_str in schedule_data:
+                    day_schedule = schedule_data[date_str]
+                    
+                    # Check upgrade
+                    if 'upgrade' in day_schedule and 'full' in day_schedule['upgrade']:
+                        last_week_assignments['upgrade'] = day_schedule['upgrade']['full']
+                    
+                    # Check tier3 morning
+                    if 'tier3' in day_schedule and 'morning' in day_schedule['tier3']:
+                        last_week_assignments['tier3_morning'] = day_schedule['tier3']['morning']
+                    
+                    # Check tier3 evening
+                    if 'tier3' in day_schedule and 'evening' in day_schedule['tier3']:
+                        last_week_assignments['tier3_evening'] = day_schedule['tier3']['evening']
+            
+            # Update internal state
+            self.prior_month_last_week = {
+                'upgrade': last_week_assignments['upgrade'],
+                'tier3_morning': last_week_assignments['tier3_morning'],
+                'tier3_evening': last_week_assignments['tier3_evening'],
+                'date': datetime.datetime.now()
+            }
+            
+            # Also set the last user properties for the scheduler
+            self.last_upgrade_user = last_week_assignments['upgrade']
+            self.last_tier3_morning_user = last_week_assignments['tier3_morning']
+            self.last_tier3_evening_user = last_week_assignments['tier3_evening']
+            
+            result['success'] = True
+            result['message'] = f"Successfully imported prior month's schedule. Last week started {last_monday.strftime('%B %d, %Y')}"
+            result['last_week_assignments'] = last_week_assignments
+            
+            return result
+            
+        except Exception as e:
+            result['message'] = f"Error importing schedule: {str(e)}"
+            return result
+    
     def load_users_from_file(self, filename: str) -> List[str]:
         """Load users from a text file, one per line"""
         users = []
@@ -109,6 +199,13 @@ class OnCallScheduler:
         
         # Get all weeks for the month
         weeks = self.get_month_weeks(year, month)
+        
+        # Check if we have prior month data and if it's relevant
+        if self.prior_month_last_week['date']:
+            print(f"Using prior month's last week assignments:")
+            print(f"  Upgrade: {self.last_upgrade_user}")
+            print(f"  Tier3 Morning: {self.last_tier3_morning_user}")
+            print(f"  Tier3 Evening: {self.last_tier3_evening_user}")
         
         # Generate for each week
         for week_start, week_end in weeks:
@@ -255,49 +352,6 @@ class OnCallScheduler:
         print(f"Warning: No available users for {shift_type} shift week of {week_start}")
         return None
     
-    def assign_upgrade_shift(self, week_start: datetime.date, 
-                           daily_assignments: Dict) -> str:
-        """Assign upgrade shift for entire week"""
-        available_users = []
-        
-        for user in self.upgrade_users:
-            # Check if user is available for entire week
-            available_all_week = True
-            for day in range(7):
-                date = week_start + datetime.timedelta(days=day)
-                if not self.is_user_available(user, date) or user in daily_assignments[date]:
-                    available_all_week = False
-                    break
-            
-            if available_all_week:
-                available_users.append(user)
-        
-        if available_users:
-            return random.choice(available_users)
-        else:
-            return None
-    
-    def assign_daily_shifts(self, tier: str, date: datetime.date, 
-                          users: List[str], schedule: Dict, 
-                          daily_assignments: Dict):
-        """Assign morning and evening shifts for a tier"""
-        available_users = [u for u in users 
-                         if self.is_user_available(u, date) 
-                         and u not in daily_assignments[date]]
-        
-        if len(available_users) >= 2:
-            # Randomly assign two different users
-            random.shuffle(available_users)
-            schedule[date][tier]['morning'] = available_users[0]
-            schedule[date][tier]['evening'] = available_users[1]
-            daily_assignments[date].add(available_users[0])
-            daily_assignments[date].add(available_users[1])
-        elif len(available_users) == 1:
-            # Only one user available - assign to morning
-            schedule[date][tier]['morning'] = available_users[0]
-            daily_assignments[date].add(available_users[0])
-        # If no users available, leave empty
-    
     def assign_daily_shifts_with_fairness(self, tier: str, date: datetime.date, 
                                           users: List[str], schedule: Dict, 
                                           daily_assignments: Dict):
@@ -431,6 +485,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             color: #28a745;
             font-weight: bold;
         }
+        .prior-month-section {
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            margin-bottom: 20px;
+        }
+        .prior-month-info {
+            padding: 10px;
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            border-radius: 4px;
+            margin-top: 10px;
+            color: #155724;
+        }
         .controls {
             text-align: center;
             margin: 30px 0;
@@ -453,6 +520,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
         .generate-btn:hover {
             background-color: #218838;
+        }
+        .import-btn {
+            padding: 10px 20px;
+            font-size: 14px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        .import-btn:hover {
+            background-color: #0056b3;
         }
         .calendar {
             margin-top: 30px;
@@ -545,6 +625,18 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     <div class="container">
         <h1>SRE On-Call Schedule Generator</h1>
         
+        <div class="section prior-month-section">
+            <h2>Import Prior Month's Schedule (Optional)</h2>
+            <p>To maintain rotation continuity and prevent back-to-back weekly assignments across months, 
+               import the prior month's Excel export file:</p>
+            <div class="file-input">
+                <label for="prior-month-file">Prior Month Excel:</label>
+                <input type="file" id="prior-month-file" accept=".xlsx" onchange="importPriorMonth(this)">
+                <button class="import-btn" onclick="clearPriorMonth()">Clear Prior Month</button>
+            </div>
+            <div id="prior-month-info"></div>
+        </div>
+        
         <div class="section">
             <h2>Load Users</h2>
             <div class="file-input">
@@ -581,14 +673,109 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <button class="export-btn" onclick="exportSchedule()" style="display: none;">Export to Excel</button>
     </div>
     
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script>
         let allUsers = new Set();
         let ptoUsers = new Set();
         let currentSchedule = null;
+        let priorMonthData = null;
         
         // Set default month to current month
         document.getElementById('month-year').value = 
             new Date().toLocaleDateString('en-US', {month: '2-digit', year: 'numeric'}).replace('/', '/');
+        
+        function importPriorMonth(fileInput) {
+            const file = fileInput.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    
+                    // Get the main schedule sheet
+                    const sheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[sheetName];
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet);
+                    
+                    // Convert to our schedule format
+                    const schedule = {};
+                    jsonData.forEach(row => {
+                        const date = row['Date'];
+                        const tier = row['Schedule'];
+                        const shift = row['Shift'];
+                        const user = row['User'];
+                        
+                        if (!schedule[date]) {
+                            schedule[date] = {};
+                        }
+                        
+                        if (tier === 'upgrade') {
+                            if (!schedule[date].upgrade) schedule[date].upgrade = {};
+                            schedule[date].upgrade.full = user;
+                        } else if (tier === 'tier2' || tier === 'tier3') {
+                            if (!schedule[date][tier]) schedule[date][tier] = {};
+                            if (shift === 'morning') {
+                                schedule[date][tier].morning = user;
+                            } else if (shift === 'evening') {
+                                schedule[date][tier].evening = user;
+                            }
+                        }
+                    });
+                    
+                    // Send to server
+                    fetch('/import_prior_month', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({schedule: schedule})
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            priorMonthData = data.last_week_assignments;
+                            displayPriorMonthInfo(data);
+                        } else {
+                            alert('Error importing prior month: ' + data.message);
+                        }
+                    });
+                    
+                } catch (error) {
+                    console.error('Error parsing Excel file:', error);
+                    alert('Error reading Excel file. Please ensure it is a valid schedule export.');
+                }
+            };
+            
+            reader.readAsArrayBuffer(file);
+        }
+        
+        function clearPriorMonth() {
+            fetch('/clear_prior_month', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                priorMonthData = null;
+                document.getElementById('prior-month-info').innerHTML = '';
+                document.getElementById('prior-month-file').value = '';
+            });
+        }
+        
+        function displayPriorMonthInfo(data) {
+            const infoDiv = document.getElementById('prior-month-info');
+            const assignments = data.last_week_assignments;
+            
+            let html = '<div class="prior-month-info">';
+            html += '<strong>' + data.message + '</strong><br>';
+            html += '<br><strong>Last Week Assignments:</strong><br>';
+            html += '• Upgrade: ' + (assignments.upgrade || 'None') + '<br>';
+            html += '• Tier3 Morning: ' + (assignments.tier3_morning || 'None') + '<br>';
+            html += '• Tier3 Evening: ' + (assignments.tier3_evening || 'None') + '<br>';
+            html += '<br><em>These users will not be scheduled for the first week of the new month.</em>';
+            html += '</div>';
+            
+            infoDiv.innerHTML = html;
+        }
         
         function loadUsersFromFile(tier, fileInput) {
             const file = fileInput.files[0];
@@ -621,7 +808,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         console.error('Error:', data.error);
                     } else {
                         document.getElementById(`${tier}-count`).textContent = 
-                            `✓ ${data.count} users loaded`;
+                            `✔ ${data.count} users loaded`;
                         console.log(`Successfully loaded ${data.count} users for ${tier}`);
                         updatePTOSection();
                     }
@@ -638,30 +825,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             };
             
             reader.readAsText(file);
-        }
-        
-        function loadUsers(tier) {
-            const filename = document.getElementById(`${tier}-file`).value;
-            if (!filename) {
-                alert('Please enter a filename');
-                return;
-            }
-            
-            fetch('/load_users', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({tier: tier, filename: filename})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    alert(data.error);
-                } else {
-                    document.getElementById(`${tier}-count`).textContent = 
-                        `(${data.count} users loaded)`;
-                    updatePTOSection();
-                }
-            });
         }
         
         function updatePTOSection() {
@@ -857,6 +1020,28 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 def index():
     return render_template_string(HTML_TEMPLATE)
 
+@app.route('/import_prior_month', methods=['POST'])
+def import_prior_month():
+    data = request.json
+    schedule_data = data.get('schedule', {})
+    
+    result = scheduler.import_prior_month_schedule(schedule_data)
+    return jsonify(result)
+
+@app.route('/clear_prior_month', methods=['POST'])
+def clear_prior_month():
+    scheduler.prior_month_last_week = {
+        'upgrade': None,
+        'tier3_morning': None,
+        'tier3_evening': None,
+        'date': None
+    }
+    scheduler.last_upgrade_user = None
+    scheduler.last_tier3_morning_user = None
+    scheduler.last_tier3_evening_user = None
+    
+    return jsonify({'success': True})
+
 @app.route('/load_users_direct', methods=['POST'])
 def load_users_direct():
     data = request.json
@@ -865,25 +1050,6 @@ def load_users_direct():
     
     if not users:
         return jsonify({'error': 'No users provided'})
-    
-    if tier == 'tier2':
-        scheduler.tier2_users = users
-    elif tier == 'tier3':
-        scheduler.tier3_users = users
-    elif tier == 'upgrade':
-        scheduler.upgrade_users = users
-    
-    return jsonify({'count': len(users)})
-
-@app.route('/load_users', methods=['POST'])
-def load_users():
-    data = request.json
-    tier = data['tier']
-    filename = data['filename']
-    
-    users = scheduler.load_users_from_file(filename)
-    if not users:
-        return jsonify({'error': f'Could not load users from {filename}'})
     
     if tier == 'tier2':
         scheduler.tier2_users = users
@@ -998,7 +1164,7 @@ def export():
     data = request.json
     schedule_data = data['schedule']
     
-    # Create an Excel file with multiple sheets instead of CSV
+    # Create an Excel file with multiple sheets
     import io
     import xlsxwriter
     
