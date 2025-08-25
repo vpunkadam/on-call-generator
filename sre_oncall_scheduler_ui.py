@@ -30,7 +30,12 @@ class OnCallScheduler:
         self.last_tier3_morning_user = None  # Track last scheduled tier3 morning user
         self.tier3_evening_rotation_queue = []  # Track tier3 evening rotation
         self.last_tier3_evening_user = None  # Track last scheduled tier3 evening user
-        self.shift_counts = defaultdict(int)  # Track total shifts per user
+        
+        # Load cumulative shift history from file if it exists
+        self.cumulative_shift_counts = defaultdict(int)  # Historical total across all months
+        self.load_cumulative_shift_history()
+        
+        self.shift_counts = defaultdict(int)  # Track shifts for current month only
         
         # Store prior month's last week assignments for continuity
         self.prior_month_last_week = {
@@ -258,9 +263,19 @@ class OnCallScheduler:
                     user_pto_days[user] = 0
             
             # Calculate shift ratios (shifts per available day)
+            # But exclude users with more than 2 PTO days from fairness comparisons
             shift_ratios = {}
+            excluded_users = []
+            
             for user in all_users:
-                available_days = num_days - user_pto_days.get(user, 0)
+                pto_days = user_pto_days.get(user, 0)
+                
+                # Exclude users with more than 2 PTO days from fairness metrics
+                if pto_days > 2:
+                    excluded_users.append(user)
+                    continue
+                    
+                available_days = num_days - pto_days
                 if available_days > 0:
                     shifts = len(user_assignments.get(user, []))
                     shift_ratios[user] = shifts / available_days
@@ -268,6 +283,7 @@ class OnCallScheduler:
                     shift_ratios[user] = 0  # User on PTO entire month
             
             # Check imbalance based on ratios, not absolute counts
+            # Only among users not excluded for excessive PTO
             if shift_ratios:
                 max_ratio = max(shift_ratios.values())
                 min_ratio = min([r for r in shift_ratios.values() if r > 0] or [0])  # Exclude users with 0 ratio
@@ -282,6 +298,12 @@ class OnCallScheduler:
                         f"Shift imbalance detected: {max_user} has {max_shifts} shifts with {user_pto_days.get(max_user, 0)} PTO days, "
                         f"{min_user} has {min_shifts} shifts with {user_pto_days.get(min_user, 0)} PTO days"
                     )
+            
+            # Add info about excluded users if any
+            if excluded_users:
+                validation_errors['info'].append(
+                    f"Users excluded from fairness metrics due to >2 PTO days: {', '.join(excluded_users)}"
+                )
         
         # Validation 5: Check for unfilled critical shifts
         import calendar
@@ -435,13 +457,40 @@ class OnCallScheduler:
             with open(filename, 'r') as f:
                 data = json.load(f)
                 counts = data.get('cumulative_counts', {})
-                self.shift_counts = defaultdict(int, counts)
+                self.cumulative_shift_counts = defaultdict(int, counts)
+                print(f"Loaded cumulative shift history for {len(counts)} users")
                 return counts
         except FileNotFoundError:
+            print("No existing shift history found, starting fresh")
             return {}
         except Exception as e:
             print(f"Error loading shift history: {e}")
             return {}
+    
+    def update_and_save_cumulative_history(self):
+        """Update cumulative counts with current month's shifts and save to file"""
+        import json
+        
+        # Update cumulative counts with this month's shifts
+        for user, count in self.shift_counts.items():
+            self.cumulative_shift_counts[user] += count
+        
+        filename = 'cumulative_shift_history.json'
+        
+        try:
+            data = {
+                'last_update': datetime.datetime.now().isoformat(),
+                'cumulative_counts': dict(self.cumulative_shift_counts)
+            }
+            
+            with open(filename, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            print(f"Saved cumulative shift history for {len(self.cumulative_shift_counts)} users")
+            return True
+        except Exception as e:
+            print(f"Error saving cumulative history: {e}")
+            return False
     
     def load_users_from_file(self, filename: str) -> List[str]:
         """Load users from a text file, one per line"""
@@ -498,7 +547,7 @@ class OnCallScheduler:
         # Track daily assignments to prevent overlaps
         daily_assignments = defaultdict(set)  # date -> set of users
         
-        # Reset shift counts for this generation
+        # Reset shift counts for THIS MONTH only (cumulative counts remain)
         self.shift_counts = defaultdict(int)
         
         # Reset monthly weekly assignment counter
@@ -598,6 +647,9 @@ class OnCallScheduler:
         if validation_errors['critical']:
             for error in validation_errors['critical']:
                 self.coverage_warnings.append(f"VALIDATION ERROR: {error}")
+        
+        # Update cumulative counts with this month's shifts and save to file
+        self.update_and_save_cumulative_history()
         
         return schedule
     
@@ -729,8 +781,9 @@ class OnCallScheduler:
                          and u not in daily_assignments[date]]
         
         if len(available_users) >= 2:
-            # Sort by shift count (ascending) to prioritize users with fewer shifts
-            available_users.sort(key=lambda u: self.shift_counts[u])
+            # Sort by CUMULATIVE shift count (ascending) to prioritize users with fewer historical shifts
+            # This ensures long-term fairness across months
+            available_users.sort(key=lambda u: self.cumulative_shift_counts[u] + self.shift_counts[u])
             
             # Assign the two users with the least shifts
             schedule[date][tier]['morning'] = available_users[0]
@@ -858,6 +911,7 @@ class OnCallScheduler:
             print("\n=== PTO Summary ===")
             all_users = set(self.tier2_users + self.tier3_users + self.upgrade_users)
             users_with_pto = []
+            excluded_from_fairness = []
             
             for user in sorted(all_users):
                 if user in self.pto_dates:
@@ -865,13 +919,20 @@ class OnCallScheduler:
                                   if date.year == year and date.month == month)
                     if pto_count > 0:
                         users_with_pto.append((user, pto_count))
+                        # Track users excluded from fairness metrics (>2 PTO days)
+                        if pto_count > 2:
+                            excluded_from_fairness.append(user)
             
             if users_with_pto:
                 print(f"Users with PTO in {month}/{year}:")
                 for user, days in sorted(users_with_pto, key=lambda x: x[1], reverse=True):
-                    print(f"  • {user}: {days} days")
+                    fairness_note = " [Excluded from fairness metrics]" if user in excluded_from_fairness else ""
+                    print(f"  • {user}: {days} days{fairness_note}")
             else:
                 print("No users have PTO this month")
+            
+            if excluded_from_fairness:
+                print(f"\n📊 Users with >2 PTO days are excluded from fairness comparisons")
             print("-" * 40)
         
         # Print coverage warnings if any
@@ -886,8 +947,8 @@ class OnCallScheduler:
                 print(f"  - {fb['date']}: {fb['tier']} {fb['shift']} -> {fb['user']} ({fb['reason']})")
         
         print("\n=== Shift Distribution Report ===")
-        print(f"{'User':<20} {'Shifts':<10} {'Weekly':<10} {'Type'}")
-        print("-" * 50)
+        print(f"{'User':<20} {'Month':<10} {'Cumulative':<12} {'Weekly':<10} {'Type'}")
+        print("-" * 60)
         
         # Separate by user type
         tier2_counts = {u: self.shift_counts[u] for u in self.tier2_users if u in self.shift_counts}
@@ -904,14 +965,23 @@ class OnCallScheduler:
                 if year and month and user in self.pto_dates:
                     pto_days = sum(1 for date in self.pto_dates[user] 
                                  if date.year == year and date.month == month)
-                    pto_note = f" (PTO: {pto_days} days)" if pto_days > 0 else ""
+                    if pto_days > 2:
+                        pto_note = f" (PTO: {pto_days} days) *"
+                    elif pto_days > 0:
+                        pto_note = f" (PTO: {pto_days} days)"
+                    else:
+                        pto_note = ""
                 else:
                     pto_note = ""
                 weekly_count = self.monthly_weekly_assignments.get(user, 0)
-                print(f"{user:<20} {count:<10} {weekly_count:<10}{pto_note}")
+                cumulative = self.cumulative_shift_counts.get(user, 0) + count
+                print(f"{user:<20} {count:<10} {cumulative:<12} {weekly_count:<10}{pto_note}")
             if all_tier2:
                 avg = sum(all_tier2.values()) / len(all_tier2)
-                print(f"Average: {avg:.1f} shifts")
+                # Calculate cumulative average
+                cumulative_avg = sum(self.cumulative_shift_counts.get(u, 0) + self.shift_counts.get(u, 0) 
+                                    for u in self.tier2_users) / len(self.tier2_users) if self.tier2_users else 0
+                print(f"Average: Month={avg:.1f}, Cumulative={cumulative_avg:.1f}")
         
         # Print Tier 3
         if self.tier3_users:
@@ -923,14 +993,23 @@ class OnCallScheduler:
                 if year and month and user in self.pto_dates:
                     pto_days = sum(1 for date in self.pto_dates[user] 
                                  if date.year == year and date.month == month)
-                    pto_note = f" (PTO: {pto_days} days)" if pto_days > 0 else ""
+                    if pto_days > 2:
+                        pto_note = f" (PTO: {pto_days} days) *"
+                    elif pto_days > 0:
+                        pto_note = f" (PTO: {pto_days} days)"
+                    else:
+                        pto_note = ""
                 else:
                     pto_note = ""
                 weekly_count = self.monthly_weekly_assignments.get(user, 0)
-                print(f"{user:<20} {count:<10} {weekly_count:<10}{pto_note}")
+                cumulative = self.cumulative_shift_counts.get(user, 0) + count
+                print(f"{user:<20} {count:<10} {cumulative:<12} {weekly_count:<10}{pto_note}")
             if all_tier3:
                 avg = sum(all_tier3.values()) / len(all_tier3)
-                print(f"Average: {avg:.1f} shifts")
+                # Calculate cumulative average
+                cumulative_avg = sum(self.cumulative_shift_counts.get(u, 0) + self.shift_counts.get(u, 0) 
+                                    for u in self.tier3_users) / len(self.tier3_users) if self.tier3_users else 0
+                print(f"Average: Month={avg:.1f}, Cumulative={cumulative_avg:.1f}")
         
         # Print Upgrade
         if self.upgrade_users:
@@ -942,16 +1021,36 @@ class OnCallScheduler:
                 if year and month and user in self.pto_dates:
                     pto_days = sum(1 for date in self.pto_dates[user] 
                                  if date.year == year and date.month == month)
-                    pto_note = f" (PTO: {pto_days} days)" if pto_days > 0 else ""
+                    if pto_days > 2:
+                        pto_note = f" (PTO: {pto_days} days) *"
+                    elif pto_days > 0:
+                        pto_note = f" (PTO: {pto_days} days)"
+                    else:
+                        pto_note = ""
                 else:
                     pto_note = ""
                 weekly_count = self.monthly_weekly_assignments.get(user, 0)
-                print(f"{user:<20} {count:<10} {weekly_count:<10}{pto_note}")
+                cumulative = self.cumulative_shift_counts.get(user, 0) + count
+                print(f"{user:<20} {count:<10} {cumulative:<12} {weekly_count:<10}{pto_note}")
             if all_upgrade:
                 avg = sum(all_upgrade.values()) / len(all_upgrade)
-                print(f"Average: {avg:.1f} shifts")
+                # Calculate cumulative average
+                cumulative_avg = sum(self.cumulative_shift_counts.get(u, 0) + self.shift_counts.get(u, 0) 
+                                    for u in self.upgrade_users) / len(self.upgrade_users) if self.upgrade_users else 0
+                print(f"Average: Month={avg:.1f}, Cumulative={cumulative_avg:.1f}")
         
         print("=" * 40)
+        
+        # Add legend if there are users with >2 PTO days
+        if year and month:
+            all_users = set(self.tier2_users + self.tier3_users + self.upgrade_users)
+            has_excluded = any(
+                sum(1 for date in self.pto_dates.get(user, []) 
+                    if date.year == year and date.month == month) > 2
+                for user in all_users
+            )
+            if has_excluded:
+                print("\n* = User has >2 PTO days and is excluded from fairness comparisons")
 
 # Global scheduler instance
 scheduler = OnCallScheduler()

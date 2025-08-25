@@ -22,6 +22,7 @@ A Python-based web application for generating fair and balanced on-call schedule
   - Automatically excludes users from scheduling during their time off
   - Intelligent date format detection (supports both MM/DD/YYYY and DD/MM/YYYY)
   - PTO is strictly enforced - no scheduling during time off
+  - Users with >2 PTO days are excluded from fairness comparisons (no catch-up mechanism)
   
 - **Fallback Coverage Strategy**:
   - Automatic fallback when insufficient users are available
@@ -170,6 +171,12 @@ Examples:
 - System warns if constraints cannot be met
 - Automatic fallback coverage when necessary
 
+### Fairness Philosophy
+- Users with more than 2 PTO days are excluded from fairness comparisons
+- No catch-up mechanism - users on extended PTO don't need to make up shifts
+- Fairness is calculated only among actively available workers
+- This prevents unfair burden on those taking legitimate time off
+
 ### Fallback Coverage Hierarchy
 When insufficient users are available:
 1. **Cross-tier coverage**: Users from other tiers cover (except upgrade)
@@ -182,12 +189,13 @@ When insufficient users are available:
 After generation, the console displays a comprehensive fairness report showing:
 - Total shifts per user (including those with 0 shifts due to PTO)
 - PTO days taken by each user
+- Users with >2 PTO days marked as excluded from fairness metrics
 - Average shifts by tier
-- Distribution analysis
+- Distribution analysis (excludes users with >2 PTO days)
 - Validation warnings for any issues detected
-- Shift imbalance calculations accounting for PTO
+- Shift imbalance calculations (only compares users with ≤2 PTO days)
 
-This helps verify equitable scheduling and identify any imbalances.
+This helps verify equitable scheduling among available workers without penalizing those on extended leave.
 
 ## Troubleshooting
 
@@ -267,9 +275,20 @@ This script is provided as-is for use in SRE team scheduling. Feel free to modif
 ## Data Persistence
 
 The application maintains persistent data in the following files:
-- `shift_history.json` - Tracks cumulative shift counts across months
+- `cumulative_shift_history.json` - Tracks total cumulative shift counts across all months
+  - Automatically loaded at startup
+  - Updated after each schedule generation
+  - Used to prioritize users with fewer historical shifts
 - `tier2_users.txt`, `tier3_users.txt`, `upgrade_users.txt` - User lists for each tier
 - Generated Excel files serve as historical records
+
+### Historical Fairness
+
+The system maintains cumulative shift counts across months to ensure long-term fairness:
+- Users with fewer total historical shifts are prioritized for new assignments
+- Cumulative counts are shown in the fairness report alongside monthly counts
+- This prevents any single user from being consistently overloaded across months
+- Excel imports also update the cumulative history to maintain continuity
 
 ## Contributing
 
