@@ -12,22 +12,42 @@ A Python-based web application for generating fair and balanced on-call schedule
 - **Fair Rotation Algorithm**: 
   - Ensures equitable distribution of shifts among team members
   - Prevents back-to-back weekly assignments
-  - Prioritizes users with fewer total shifts for tier 2 assignments
+  - Prioritizes users with fewer total shifts for fairness
+  - Enforces "everyone gets 1 before anyone gets 2" rule for weekly shifts
+  - Maximum 2 weekly shifts per user per month
+  - Persistent shift tracking across months for long-term fairness
   
 - **PTO Management**: 
   - Support for multiple PTO date ranges per user
   - Automatically excludes users from scheduling during their time off
+  - Intelligent date format detection (supports both MM/DD/YYYY and DD/MM/YYYY)
+  - PTO is strictly enforced - no scheduling during time off
+  
+- **Fallback Coverage Strategy**:
+  - Automatic fallback when insufficient users are available
+  - Cross-tier coverage (except upgrade tier remains restricted)
+  - Double shift assignments when necessary (clearly marked)
+  - Emergency coverage as last resort
+  
+- **Comprehensive Validation**:
+  - Post-generation validation ensures all requirements are met
+  - Checks for PTO violations, double-bookings, and shift imbalances
+  - Accounts for PTO when validating fairness
+  - Warnings for any constraint violations
   
 - **Web-Based Interface**: 
   - Clean, intuitive UI for managing users and generating schedules
   - Visual calendar display with color-coded shifts
-  - No installation required for end users - just open in browser
+  - Clear indicators for double shifts and emergency coverage
+  - Real-time validation feedback
   
-- **Excel Export**: 
+- **Excel Import/Export**: 
+  - Import previous month's schedule to track cumulative shift counts
   - Comprehensive Excel workbook with multiple sheets
   - Main schedule sheet with all assignments
   - Individual sheets for each user showing their specific shifts
   - Color-coded by tier for easy reading
+  - Preserves shift history for fairness tracking
 
 ## Shift Timings
 
@@ -43,13 +63,14 @@ A Python-based web application for generating fair and balanced on-call schedule
 - Python 3.6+
 - Flask
 - xlsxwriter
+- openpyxl (for Excel import functionality)
 
 ## Installation
 
-1. Clone or download the script
+1. Clone or download the repository
 2. Install required dependencies:
 ```bash
-pip install flask xlsxwriter
+pip install flask xlsxwriter openpyxl
 ```
 
 ## Usage
@@ -58,13 +79,14 @@ pip install flask xlsxwriter
 
 Run the script from command line:
 ```bash
-python oncall_scheduler.py
+python sre_oncall_scheduler_ui.py
 ```
 
 The application will:
 1. Start a local web server on port 5000
-2. Automatically open your default browser to `http://localhost:5000`
+2. Automatically open your default browser to `http://127.0.0.1:5000`
 3. Display the web interface for schedule generation
+4. Load any existing shift history from `shift_history.json` if present
 
 ### Loading Users
 
@@ -88,13 +110,23 @@ sarah.jones
 
 1. After loading users, the PTO section will appear
 2. Check the box next to any user who will be on PTO
-3. Enter PTO date ranges in `DD/MM/YYYY-DD/MM/YYYY` format
+3. Enter PTO date ranges in `MM/DD/YYYY-MM/DD/YYYY` format (primary format)
 4. Multiple date ranges can be entered separated by commas
+5. Single dates can also be entered: `MM/DD/YYYY`
+6. The system intelligently detects and handles both MM/DD/YYYY and DD/MM/YYYY formats
 
-Example:
+Examples:
 ```
-01/03/2024-05/03/2024, 15/03/2024-20/03/2024
+03/01/2024-03/05/2024, 03/15/2024-03/20/2024
+12/09/2025
+09/06/2025-09/09/2025, 09/27/2025-10/13/2025
 ```
+
+### Importing Previous Month's Schedule (Optional)
+
+1. If you have a previous month's Excel schedule, click "Import Previous Month Schedule"
+2. Upload the Excel file to carry forward shift counts
+3. This ensures long-term fairness across months
 
 ### Generating the Schedule
 
@@ -102,6 +134,10 @@ Example:
 2. Click "Generate Schedule"
 3. The schedule will display in a visual calendar format
 4. Review the assignments for accuracy and fairness
+5. Check for any validation warnings (displayed in red)
+6. Look for special indicators:
+   - **(DOUBLE)**: User has multiple shifts that day
+   - **(EMERGENCY)**: Emergency fallback coverage
 
 ### Exporting to Excel
 
@@ -118,23 +154,38 @@ Example:
 - Users are assigned for entire weeks (Monday-Sunday)
 - No back-to-back week assignments (when possible)
 - Fair rotation ensures all users get equal opportunities
+- **Priority Rule**: Everyone gets 1 weekly shift before anyone gets 2
+- Maximum 2 weekly shifts per user per month
+- Upgrade tier is restricted - only upgrade users can be assigned
 
 ### Daily Assignments (Tier 2)
 - Assigned on a per-day basis
 - Algorithm prioritizes users with fewer total shifts
 - Ensures balanced distribution across the month
+- Tracks cumulative shifts across months for long-term fairness
 
 ### Conflict Prevention
 - No user can have multiple shifts on the same day
-- PTO dates are strictly respected
+- PTO dates are strictly respected - no exceptions
 - System warns if constraints cannot be met
+- Automatic fallback coverage when necessary
+
+### Fallback Coverage Hierarchy
+When insufficient users are available:
+1. **Cross-tier coverage**: Users from other tiers cover (except upgrade)
+2. **Double shifts**: Existing users take additional shifts (marked as "DOUBLE")
+3. **Emergency coverage**: Last resort assignment (marked as "EMERGENCY")
+4. Upgrade tier never uses fallback - remains restricted to upgrade users only
 
 ## Fairness Report
 
-After generation, the console displays a fairness report showing:
-- Total shifts per user
+After generation, the console displays a comprehensive fairness report showing:
+- Total shifts per user (including those with 0 shifts due to PTO)
+- PTO days taken by each user
 - Average shifts by tier
 - Distribution analysis
+- Validation warnings for any issues detected
+- Shift imbalance calculations accounting for PTO
 
 This helps verify equitable scheduling and identify any imbalances.
 
@@ -151,16 +202,24 @@ app.run(debug=False, port=5001)  # Change to any available port
 - Remove any empty lines or special characters
 - Use UTF-8 encoding for files with special characters
 
-### Excel Export Not Working
-Ensure xlsxwriter is installed:
+### Excel Import/Export Not Working
+Ensure required libraries are installed:
 ```bash
-pip install --upgrade xlsxwriter
+pip install --upgrade xlsxwriter openpyxl
 ```
 
 ### Schedule Generation Errors
 - Verify sufficient users are loaded for each tier
 - Check that PTO dates don't conflict with minimum staffing requirements
 - Review console output for specific error messages
+- Check validation warnings for any constraint violations
+- If users show 0 shifts, verify they don't have PTO for the entire month
+
+### PTO Not Being Recognized
+- Ensure date format is correct (MM/DD/YYYY preferred)
+- Check for mixed date formats - system will try to auto-detect
+- Verify no extra spaces or special characters in date ranges
+- Single dates should not have a dash: `12/09/2025` not `12/09/2025-`
 
 ## Customization
 
@@ -197,21 +256,29 @@ The application consists of:
 - `GET /` - Serves the main web interface
 - `POST /load_users_direct` - Loads users from uploaded files
 - `GET /get_all_users` - Returns all loaded users
-- `POST /generate` - Generates the schedule
+- `POST /generate` - Generates the schedule with validation
 - `POST /export` - Creates and downloads Excel file
+- `POST /import_excel` - Imports previous month's Excel schedule
 
 ## License
 
 This script is provided as-is for use in SRE team scheduling. Feel free to modify and adapt to your organization's needs.
 
+## Data Persistence
+
+The application maintains persistent data in the following files:
+- `shift_history.json` - Tracks cumulative shift counts across months
+- `tier2_users.txt`, `tier3_users.txt`, `upgrade_users.txt` - User lists for each tier
+- Generated Excel files serve as historical records
+
 ## Contributing
 
-Suggestions and improvements are welcome. Key areas for enhancement:
+Suggestions and improvements are welcome. Key areas for potential enhancement:
 - Integration with calendar systems (Google Calendar, Outlook)
-- Slack/email notifications
-- Historical schedule tracking
-- Preference-based scheduling
-- On-call swap management
+- Slack/email notifications for schedule publication
+- Preference-based scheduling (preferred/blocked dates)
+- On-call swap management between users
+- Dashboard for historical analytics
 
 ## Support
 
