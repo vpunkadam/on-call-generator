@@ -23,7 +23,15 @@ A Python-based web application for generating fair and balanced on-call schedule
   - Automatically excludes users from scheduling during their time off
   - Intelligent date format detection (supports both MM/DD/YYYY and DD/MM/YYYY)
   - PTO is strictly enforced - no scheduling during time off
-  - Users with >2 PTO days are excluded from fairness comparisons (no catch-up mechanism)
+  - Workload-based fairness ensures PTO users aren't overloaded upon return
+
+- **Mandatory Shift Requests**:
+  - Users can request specific shifts on certain dates
+  - **Requested shifts are MANDATORY** - guaranteed assignment
+  - Takes precedence over all other scheduling logic
+  - Only blocked by PTO or existing shift conflicts
+  - Reports clearly show mandatory requested shifts
+  - Perfect for accommodating critical commitments or preferences
   
 - **Fallback Coverage Strategy**:
   - Automatic fallback when insufficient users are available
@@ -124,6 +132,27 @@ Examples:
 09/06/2025-09/09/2025, 09/27/2025-10/13/2025
 ```
 
+### Setting Shift Preferences (Mandatory Assignments)
+
+1. After loading users, check the box next to users who have requested shifts
+2. A second field will appear for entering requested shifts (similar to PTO input)
+3. Enter requested shifts in the format: `[type]-MM/DD/YYYY`
+4. Multiple requests can be entered separated by commas
+
+Format options:
+- `tier2am-MM/DD/YYYY` - Tier 2 morning shift
+- `tier2pm-MM/DD/YYYY` - Tier 2 evening shift  
+- `tier3am-MM/DD/YYYY` - Tier 3 morning shift
+- `tier3pm-MM/DD/YYYY` - Tier 3 evening shift
+- `upgrade-MM/DD/YYYY` - Upgrade full shift (will apply to that week)
+
+Example:
+```
+tier2am-03/15/2024, tier2pm-03/20/2024, tier3am-03/25/2024
+```
+
+**IMPORTANT**: Requested shifts are MANDATORY and take precedence over all other scheduling logic. The system will guarantee these assignments unless the user is on PTO or already has a conflicting shift on that date.
+
 ### Importing Previous Month's Schedule (Optional)
 
 1. If you have a previous month's Excel schedule, click "Import Previous Month Schedule"
@@ -170,14 +199,16 @@ Examples:
 ### Conflict Prevention
 - No user can have multiple shifts on the same day
 - PTO dates are strictly respected - no exceptions
+- **Requested shifts are mandatory** - guaranteed assignment unless PTO or conflict
 - System warns if constraints cannot be met
 - Automatic fallback coverage when necessary
 
 ### Fairness Philosophy
-- Users with more than 2 PTO days are excluded from fairness comparisons
-- No catch-up mechanism - users on extended PTO don't need to make up shifts
-- Fairness is calculated only among actively available workers
-- This prevents unfair burden on those taking legitimate time off
+- **Percentage-based fairness**: Workload is measured as percentage of available days worked
+- **No catch-up mechanism**: Users returning from PTO aren't overloaded to match others' shift counts
+- **Example**: User A with 10 shifts and 30 available days (33% workload) is prioritized over User B with 8 shifts and 20 available days (40% workload)
+- **Fair distribution**: Everyone works roughly the same percentage of their available days
+- This ensures users with extended PTO aren't penalized when they return
 
 ### Fallback Coverage Hierarchy
 When insufficient users are available:
@@ -190,14 +221,13 @@ When insufficient users are available:
 
 After generation, the console displays a comprehensive fairness report showing:
 - Total shifts per user (including those with 0 shifts due to PTO)
-- PTO days taken by each user
-- Users with >2 PTO days marked as excluded from fairness metrics
-- Average shifts by tier
-- Distribution analysis (excludes users with >2 PTO days)
-- Validation warnings for any issues detected
-- Shift imbalance calculations (only compares users with ≤2 PTO days)
+- **Workload percentage**: Shows what % of available days each user works
+- PTO days taken and available days for each user
+- Average workload percentage across all users
+- Cumulative shift counts for long-term tracking
+- Validation warnings for workload imbalances (>20% difference)
 
-This helps verify equitable scheduling among available workers without penalizing those on extended leave.
+The system ensures fair distribution by having everyone work approximately the same percentage of their available days, not the same absolute number of shifts.
 
 ## Troubleshooting
 
@@ -266,7 +296,7 @@ The application consists of:
 - `GET /` - Serves the main web interface
 - `POST /load_users_direct` - Loads users from uploaded files
 - `GET /get_all_users` - Returns all loaded users
-- `POST /generate` - Generates the schedule with validation
+- `POST /generate` - Generates the schedule with validation (includes PTO and preferences)
 - `POST /export` - Creates and downloads Excel file
 - `POST /import_excel` - Imports previous month's Excel schedule
 

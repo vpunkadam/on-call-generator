@@ -37,6 +37,12 @@ class OnCallScheduler:
         
         self.shift_counts = defaultdict(int)  # Track shifts for current month only
         
+        # Shift preferences: user -> list of (date, tier, shift) tuples
+        # Example: {'alice': [(date(2025,3,15), 'tier2', 'morning'), ...]}
+        self.shift_preferences = defaultdict(list)
+        self.honored_preferences = []  # Track which preferences were honored
+        self.unmet_preferences = []    # Track which preferences couldn't be met
+        
         # Store prior month's last week assignments for continuity
         self.prior_month_last_week = {
             'upgrade': None,
@@ -262,47 +268,48 @@ class OnCallScheduler:
                 else:
                     user_pto_days[user] = 0
             
-            # Calculate shift ratios (shifts per available day)
-            # But exclude users with more than 2 PTO days from fairness comparisons
-            shift_ratios = {}
-            excluded_users = []
+            # Calculate workload percentages (shifts per available day)
+            # This ensures fair distribution based on availability, not absolute numbers
+            workload_percentages = {}
             
             for user in all_users:
                 pto_days = user_pto_days.get(user, 0)
-                
-                # Exclude users with more than 2 PTO days from fairness metrics
-                if pto_days > 2:
-                    excluded_users.append(user)
-                    continue
-                    
                 available_days = num_days - pto_days
+                
                 if available_days > 0:
                     shifts = len(user_assignments.get(user, []))
-                    shift_ratios[user] = shifts / available_days
+                    # Calculate percentage of available days worked
+                    workload_percentages[user] = (shifts / available_days) * 100
                 else:
-                    shift_ratios[user] = 0  # User on PTO entire month
+                    # User on PTO entire month - no workload
+                    workload_percentages[user] = 0
             
-            # Check imbalance based on ratios, not absolute counts
-            # Only among users not excluded for excessive PTO
-            if shift_ratios:
-                max_ratio = max(shift_ratios.values())
-                min_ratio = min([r for r in shift_ratios.values() if r > 0] or [0])  # Exclude users with 0 ratio
+            # Check for workload imbalance
+            # Filter out users with 0% workload (full month PTO)
+            active_workloads = {u: w for u, w in workload_percentages.items() if w > 0}
+            
+            if active_workloads:
+                max_workload = max(active_workloads.values())
+                min_workload = min(active_workloads.values())
                 
-                # Only warn if the ratio difference is significant (>30% difference)
-                if max_ratio > 0 and min_ratio > 0 and (max_ratio - min_ratio) / min_ratio > 0.3:
-                    max_user = max(shift_ratios, key=shift_ratios.get)
-                    min_user = min([u for u, r in shift_ratios.items() if r > 0], key=shift_ratios.get)
+                # Warn if the difference is significant (>20 percentage points)
+                if max_workload - min_workload > 20:
+                    max_user = max(active_workloads, key=active_workloads.get)
+                    min_user = min(active_workloads, key=active_workloads.get)
                     max_shifts = len(user_assignments.get(max_user, []))
                     min_shifts = len(user_assignments.get(min_user, []))
+                    max_available = num_days - user_pto_days.get(max_user, 0)
+                    min_available = num_days - user_pto_days.get(min_user, 0)
+                    
                     validation_errors['warnings'].append(
-                        f"Shift imbalance detected: {max_user} has {max_shifts} shifts with {user_pto_days.get(max_user, 0)} PTO days, "
-                        f"{min_user} has {min_shifts} shifts with {user_pto_days.get(min_user, 0)} PTO days"
+                        f"Workload imbalance: {max_user} works {workload_percentages[max_user]:.1f}% of their {max_available} available days ({max_shifts} shifts), "
+                        f"{min_user} works {workload_percentages[min_user]:.1f}% of their {min_available} available days ({min_shifts} shifts)"
                     )
-            
-            # Add info about excluded users if any
-            if excluded_users:
+                
+                # Info message about fair workload distribution
+                avg_workload = sum(active_workloads.values()) / len(active_workloads)
                 validation_errors['info'].append(
-                    f"Users excluded from fairness metrics due to >2 PTO days: {', '.join(excluded_users)}"
+                    f"Average workload: {avg_workload:.1f}% of available days (fair target)"
                 )
         
         # Validation 5: Check for unfilled critical shifts
@@ -573,6 +580,84 @@ class OnCallScheduler:
                 return False
         return True
     
+    def get_user_available_days(self, user: str, year: int, month: int) -> int:
+        """Get the number of days a user is available in a given month (not on PTO)"""
+        import calendar
+        num_days = calendar.monthrange(year, month)[1]
+        
+        if user not in self.pto_dates:
+            return num_days
+        
+        # Count PTO days in this month
+        pto_days = sum(1 for date in self.pto_dates[user] 
+                      if date.year == year and date.month == month)
+        
+        return num_days - pto_days
+    
+    def calculate_fairness_score(self, user: str, year: int, month: int) -> float:
+        """Calculate fairness score based on shifts per available day"""
+        available_days = self.get_user_available_days(user, year, month)
+        
+        if available_days == 0:
+            # User on PTO entire month
+            return float('inf')  # Don't assign any shifts
+        
+        # Current month shifts + cumulative shifts, divided by available days
+        total_shifts = self.cumulative_shift_counts.get(user, 0) + self.shift_counts.get(user, 0)
+        
+        # For fairness, we care about the shift-to-available-day ratio
+        # Users with lower ratios should get priority
+        return total_shifts / available_days
+    
+    def parse_preference_string(self, user: str, pref_string: str):
+        """Parse preference string format: tier2am-MM/DD/YYYY, tier2pm-MM/DD/YYYY, etc."""
+        if not pref_string:
+            return
+        
+        # Split by comma for multiple preferences
+        preferences = [p.strip() for p in pref_string.split(',')]
+        
+        for pref in preferences:
+            if '-' not in pref:
+                continue
+                
+            try:
+                shift_type, date_str = pref.split('-', 1)
+                shift_type = shift_type.lower().strip()
+                date_str = date_str.strip()
+                
+                # Parse the date
+                date = datetime.datetime.strptime(date_str, '%m/%d/%Y').date()
+                
+                # Map the shift type to tier and shift
+                shift_mapping = {
+                    'tier2am': ('tier2', 'morning'),
+                    'tier2pm': ('tier2', 'evening'),
+                    'tier3am': ('tier3', 'morning'),
+                    'tier3pm': ('tier3', 'evening'),
+                    'upgrade': ('upgrade', 'full')
+                }
+                
+                if shift_type in shift_mapping:
+                    tier, shift = shift_mapping[shift_type]
+                    self.shift_preferences[user].append((date, tier, shift))
+                    print(f"Added preference: {user} requests {tier} {shift} on {date}")
+                else:
+                    print(f"Invalid preference format: {pref}")
+                    
+            except Exception as e:
+                print(f"Error parsing preference '{pref}' for {user}: {e}")
+    
+    def check_user_preference(self, user: str, date: datetime.date, tier: str, shift: str) -> bool:
+        """Check if a user has a preference for this specific shift"""
+        if user not in self.shift_preferences:
+            return False
+        
+        for pref_date, pref_tier, pref_shift in self.shift_preferences[user]:
+            if pref_date == date and pref_tier == tier and pref_shift == shift:
+                return True
+        return False
+    
     def generate_schedule(self, year: int, month: int):
         """Generate the on-call schedule for a given month"""
         schedule = defaultdict(lambda: defaultdict(dict))
@@ -585,6 +670,10 @@ class OnCallScheduler:
         
         # Reset monthly weekly assignment counter
         self.monthly_weekly_assignments = defaultdict(int)
+        
+        # Reset preference tracking for this generation
+        self.honored_preferences = []
+        self.unmet_preferences = []
         
         # Initialize rotation queues
         self.upgrade_rotation_queue = self.upgrade_users.copy()
@@ -608,12 +697,69 @@ class OnCallScheduler:
         
         # Generate for each week
         for week_start, week_end in weeks:
-            # Assign upgrade shift (one person for entire week)
-            upgrade_user = self.assign_weekly_shift_with_rotation(
-                'upgrade', week_start, daily_assignments, 
-                self.upgrade_rotation_queue, self.last_upgrade_user,
-                self.upgrade_users
-            )
+            # FIRST: Check for MANDATORY requested weekly shifts
+            upgrade_user = None
+            tier3_morning_user = None
+            tier3_evening_user = None
+            
+            # Check if any user requested upgrade shift for this week
+            for user in self.upgrade_users:
+                for day in range(7):
+                    date = week_start + datetime.timedelta(days=day)
+                    if self.check_user_preference(user, date, 'upgrade', 'full'):
+                        # Check if user is available for entire week and not already assigned
+                        available_all_week = True
+                        for check_day in range(7):
+                            check_date = week_start + datetime.timedelta(days=check_day)
+                            if not self.is_user_available(user, check_date) or user in daily_assignments[check_date]:
+                                available_all_week = False
+                                break
+                        if available_all_week:
+                            upgrade_user = user
+                            print(f"MANDATORY: Assigned {user} to upgrade for week of {week_start} (requested)")
+                            break
+                if upgrade_user:
+                    break
+            
+            # Check for tier3 morning requests
+            for user in self.tier3_users:
+                for day in range(7):
+                    date = week_start + datetime.timedelta(days=day)
+                    if self.check_user_preference(user, date, 'tier3', 'morning'):
+                        # Check if user is available for entire week and not already assigned
+                        available_all_week = True
+                        for check_day in range(7):
+                            check_date = week_start + datetime.timedelta(days=check_day)
+                            if not self.is_user_available(user, check_date) or user in daily_assignments[check_date]:
+                                available_all_week = False
+                                break
+                        if available_all_week:
+                            tier3_morning_user = user
+                            print(f"MANDATORY: Assigned {user} to tier3 morning for week of {week_start} (requested)")
+                            break
+                if tier3_morning_user:
+                    break
+            
+            # Check for tier3 evening requests
+            for user in self.tier3_users:
+                for day in range(7):
+                    date = week_start + datetime.timedelta(days=day)
+                    if self.check_user_preference(user, date, 'tier3', 'evening'):
+                        # Check if user is available for entire week and not already assigned
+                        available_all_week = True
+                        for check_day in range(7):
+                            check_date = week_start + datetime.timedelta(days=check_day)
+                            if not self.is_user_available(user, check_date) or user in daily_assignments[check_date]:
+                                available_all_week = False
+                                break
+                        if available_all_week:
+                            tier3_evening_user = user
+                            print(f"MANDATORY: Assigned {user} to tier3 evening for week of {week_start} (requested)")
+                            break
+                if tier3_evening_user:
+                    break
+            
+            # Apply mandatory weekly assignments
             if upgrade_user:
                 current = week_start
                 while current <= week_end:
@@ -621,18 +767,13 @@ class OnCallScheduler:
                     daily_assignments[current].add(upgrade_user)
                     current += datetime.timedelta(days=1)
                 self.last_upgrade_user = upgrade_user
-                # Count this as 7 shifts (one per day of the week)
                 self.shift_counts[upgrade_user] += 7
-                # Increment weekly assignment counter
                 self.monthly_weekly_assignments[upgrade_user] += 1
+                for day in range(7):
+                    date = week_start + datetime.timedelta(days=day)
+                    if self.check_user_preference(upgrade_user, date, 'upgrade', 'full'):
+                        self.honored_preferences.append((upgrade_user, date, 'upgrade', 'full'))
             
-            # Assign tier3 weekly shifts
-            # Morning shift
-            tier3_morning_user = self.assign_weekly_shift_with_rotation(
-                'tier3_morning', week_start, daily_assignments,
-                self.tier3_morning_rotation_queue, self.last_tier3_morning_user,
-                self.tier3_users
-            )
             if tier3_morning_user:
                 current = week_start
                 while current <= week_end:
@@ -640,17 +781,13 @@ class OnCallScheduler:
                     daily_assignments[current].add(tier3_morning_user)
                     current += datetime.timedelta(days=1)
                 self.last_tier3_morning_user = tier3_morning_user
-                # Count this as 7 shifts
                 self.shift_counts[tier3_morning_user] += 7
-                # Increment weekly assignment counter
                 self.monthly_weekly_assignments[tier3_morning_user] += 1
+                for day in range(7):
+                    date = week_start + datetime.timedelta(days=day)
+                    if self.check_user_preference(tier3_morning_user, date, 'tier3', 'morning'):
+                        self.honored_preferences.append((tier3_morning_user, date, 'tier3', 'morning'))
             
-            # Evening shift
-            tier3_evening_user = self.assign_weekly_shift_with_rotation(
-                'tier3_evening', week_start, daily_assignments,
-                self.tier3_evening_rotation_queue, self.last_tier3_evening_user,
-                self.tier3_users
-            )
             if tier3_evening_user:
                 current = week_start
                 while current <= week_end:
@@ -658,16 +795,67 @@ class OnCallScheduler:
                     daily_assignments[current].add(tier3_evening_user)
                     current += datetime.timedelta(days=1)
                 self.last_tier3_evening_user = tier3_evening_user
-                # Count this as 7 shifts
                 self.shift_counts[tier3_evening_user] += 7
-                # Increment weekly assignment counter
                 self.monthly_weekly_assignments[tier3_evening_user] += 1
+                for day in range(7):
+                    date = week_start + datetime.timedelta(days=day)
+                    if self.check_user_preference(tier3_evening_user, date, 'tier3', 'evening'):
+                        self.honored_preferences.append((tier3_evening_user, date, 'tier3', 'evening'))
+            
+            # Now assign any remaining weekly shifts using rotation logic
+            if not upgrade_user:
+                upgrade_user = self.assign_weekly_shift_with_rotation(
+                    'upgrade', week_start, daily_assignments, 
+                    self.upgrade_rotation_queue, self.last_upgrade_user,
+                    self.upgrade_users
+                )
+                if upgrade_user:
+                    current = week_start
+                    while current <= week_end:
+                        schedule[current]['upgrade']['full'] = upgrade_user
+                        daily_assignments[current].add(upgrade_user)
+                        current += datetime.timedelta(days=1)
+                    self.last_upgrade_user = upgrade_user
+                    self.shift_counts[upgrade_user] += 7
+                    self.monthly_weekly_assignments[upgrade_user] += 1
+            
+            if not tier3_morning_user:
+                tier3_morning_user = self.assign_weekly_shift_with_rotation(
+                    'tier3_morning', week_start, daily_assignments,
+                    self.tier3_morning_rotation_queue, self.last_tier3_morning_user,
+                    self.tier3_users
+                )
+                if tier3_morning_user:
+                    current = week_start
+                    while current <= week_end:
+                        schedule[current]['tier3']['morning'] = tier3_morning_user
+                        daily_assignments[current].add(tier3_morning_user)
+                        current += datetime.timedelta(days=1)
+                    self.last_tier3_morning_user = tier3_morning_user
+                    self.shift_counts[tier3_morning_user] += 7
+                    self.monthly_weekly_assignments[tier3_morning_user] += 1
+            
+            if not tier3_evening_user:
+                tier3_evening_user = self.assign_weekly_shift_with_rotation(
+                    'tier3_evening', week_start, daily_assignments,
+                    self.tier3_evening_rotation_queue, self.last_tier3_evening_user,
+                    self.tier3_users
+                )
+                if tier3_evening_user:
+                    current = week_start
+                    while current <= week_end:
+                        schedule[current]['tier3']['evening'] = tier3_evening_user
+                        daily_assignments[current].add(tier3_evening_user)
+                        current += datetime.timedelta(days=1)
+                    self.last_tier3_evening_user = tier3_evening_user
+                    self.shift_counts[tier3_evening_user] += 7
+                    self.monthly_weekly_assignments[tier3_evening_user] += 1
             
             # Assign tier2 daily shifts
             current = week_start
             while current <= week_end:
                 self.assign_daily_shifts_with_fairness('tier2', current, self.tier2_users, 
-                                       schedule, daily_assignments)
+                                       schedule, daily_assignments, year, month)
                 current += datetime.timedelta(days=1)
         
         # Validate the generated schedule
@@ -806,14 +994,52 @@ class OnCallScheduler:
     
     def assign_daily_shifts_with_fairness(self, tier: str, date: datetime.date, 
                                           users: List[str], schedule: Dict, 
-                                          daily_assignments: Dict):
+                                          daily_assignments: Dict, year: int, month: int):
         """Assign morning and evening shifts for a tier with fairness consideration"""
-        # Get available users for this date
+        
+        # FIRST: Check for MANDATORY requested shifts - these take absolute priority
+        morning_assigned = None
+        evening_assigned = None
+        
+        # Check all users (not just available) for requested shifts
+        for user in users:
+            # Skip if user is on PTO
+            if not self.is_user_available(user, date):
+                continue
+            
+            # Skip if user already has a shift today (prevent double shifts even for requests)
+            if user in daily_assignments[date]:
+                continue
+                
+            if self.check_user_preference(user, date, tier, 'morning') and morning_assigned is None:
+                schedule[date][tier]['morning'] = user
+                daily_assignments[date].add(user)
+                self.shift_counts[user] += 1
+                morning_assigned = user
+                self.honored_preferences.append((user, date, tier, 'morning'))
+                print(f"MANDATORY: Assigned {user} to {tier} morning on {date} (requested)")
+                
+            elif self.check_user_preference(user, date, tier, 'evening') and evening_assigned is None:
+                # Note: using elif to prevent same user getting both shifts on same day
+                schedule[date][tier]['evening'] = user
+                daily_assignments[date].add(user)
+                self.shift_counts[user] += 1
+                evening_assigned = user
+                self.honored_preferences.append((user, date, tier, 'evening'))
+                print(f"MANDATORY: Assigned {user} to {tier} evening on {date} (requested)")
+        
+        # If both shifts are already assigned by mandatory requests, we're done
+        if morning_assigned and evening_assigned:
+            return
+        
+        # Now handle any remaining unfilled shifts with regular logic
+        # Get available users for this date (excluding those already assigned)
         available_users = [u for u in users 
                          if self.is_user_available(u, date) 
                          and u not in daily_assignments[date]]
         
-        if len(available_users) >= 2:
+        # If we need to fill remaining shifts
+        if not morning_assigned or not evening_assigned:
             # Check who was assigned yesterday (for Tier 2 only, to avoid back-to-back)
             yesterday_users = set()
             if tier == 'tier2':
@@ -826,46 +1052,85 @@ class OnCallScheduler:
                             base_user = user.split(' (')[0] if ' (' in user else user
                             yesterday_users.add(base_user)
             
-            # Sort by CUMULATIVE shift count (ascending) to prioritize users with fewer historical shifts
-            # But also consider back-to-back assignments for Tier 2
-            def sort_key(user):
-                base_score = self.cumulative_shift_counts[user] + self.shift_counts[user]
+            # Check for preferences for each specific shift
+            morning_preferred = []
+            evening_preferred = []
+            
+            for user in available_users:
+                if self.check_user_preference(user, date, tier, 'morning'):
+                    morning_preferred.append(user)
+                if self.check_user_preference(user, date, tier, 'evening'):
+                    evening_preferred.append(user)
+            
+            # Sort function that considers preferences and fairness
+            def sort_key_with_preference(user, shift_type):
+                # Calculate the fairness score (shifts per available day)
+                base_score = self.calculate_fairness_score(user, year, month)
+                
+                # Give strong priority if user has preference for this specific shift
+                if shift_type == 'morning' and user in morning_preferred:
+                    base_score -= 100  # Large negative to prioritize
+                elif shift_type == 'evening' and user in evening_preferred:
+                    base_score -= 100
+                
                 # Add penalty if user worked yesterday (for Tier 2)
                 if user in yesterday_users:
-                    base_score += 100  # Large penalty to push them down the list
+                    base_score += 10  # Penalty to avoid back-to-back
+                
                 return base_score
             
-            available_users.sort(key=sort_key)
+            # Only assign morning if not already assigned by mandatory request
+            if not morning_assigned and available_users:
+                morning_candidates = available_users.copy()
+                morning_candidates.sort(key=lambda u: sort_key_with_preference(u, 'morning'))
+                morning_user = morning_candidates[0]
+                schedule[date][tier]['morning'] = morning_user
+                daily_assignments[date].add(morning_user)
+                self.shift_counts[morning_user] += 1
+                morning_assigned = morning_user
             
-            # Assign the two users with the best scores (least shifts, not yesterday)
-            schedule[date][tier]['morning'] = available_users[0]
-            schedule[date][tier]['evening'] = available_users[1]
-            daily_assignments[date].add(available_users[0])
-            daily_assignments[date].add(available_users[1])
+            # Only assign evening if not already assigned by mandatory request
+            if not evening_assigned and available_users:
+                # Exclude morning user if already assigned
+                evening_candidates = [u for u in available_users if u != morning_assigned]
+                if evening_candidates:
+                    evening_candidates.sort(key=lambda u: sort_key_with_preference(u, 'evening'))
+                    evening_user = evening_candidates[0]
+                else:
+                    # Fallback if only one user available
+                    evening_user = morning_assigned if morning_assigned else available_users[0] if available_users else None
+                
+                if evening_user:
+                    schedule[date][tier]['evening'] = evening_user
+                    daily_assignments[date].add(evening_user)
+                    if evening_user != morning_assigned:  # Only count once if same user has both shifts
+                        self.shift_counts[evening_user] += 1
+                    evening_assigned = evening_user
             
-            # Update shift counts
-            self.shift_counts[available_users[0]] += 1
-            self.shift_counts[available_users[1]] += 1
-            
-        elif len(available_users) == 1:
-            # Only one user available - assign to morning
-            schedule[date][tier]['morning'] = available_users[0]
-            daily_assignments[date].add(available_users[0])
-            self.shift_counts[available_users[0]] += 1
-            
-            # Add warning about insufficient coverage
-            warning = f"WARNING: Only 1 user available for {tier} on {date.strftime('%Y-%m-%d')} - evening shift unfilled"
-            self.coverage_warnings.append(warning)
-            
-            # Try fallback: find user with least shifts who can do double shift
-            self.attempt_fallback_coverage(tier, date, 'evening', users, schedule, daily_assignments, available_users[0])
-        else:
-            # No users available - try emergency fallback
-            warning = f"CRITICAL: No users available for {tier} on {date.strftime('%Y-%m-%d')}"
-            self.coverage_warnings.append(warning)
-            
-            # Attempt emergency coverage
-            self.attempt_emergency_coverage(tier, date, users, schedule, daily_assignments)
+        # Handle case where we have only one available user or none
+        if not morning_assigned and not evening_assigned:
+            if len(available_users) == 1:
+                # Only one user available - assign to morning first
+                schedule[date][tier]['morning'] = available_users[0]
+                daily_assignments[date].add(available_users[0])
+                self.shift_counts[available_users[0]] += 1
+                
+                # Add warning about insufficient coverage
+                warning = f"WARNING: Only 1 user available for {tier} on {date.strftime('%Y-%m-%d')} - evening shift unfilled"
+                self.coverage_warnings.append(warning)
+                
+                # Try fallback for evening
+                self.attempt_fallback_coverage(tier, date, 'evening', users, schedule, daily_assignments, available_users[0])
+            elif len(available_users) == 0:
+                # No users available - try emergency fallback
+                warning = f"CRITICAL: No users available for {tier} on {date.strftime('%Y-%m-%d')}"
+                self.coverage_warnings.append(warning)
+                
+                # Attempt emergency coverage for both shifts if needed
+                if not morning_assigned:
+                    self.attempt_emergency_coverage(tier, date, users, schedule, daily_assignments)
+                if not evening_assigned:
+                    self.attempt_fallback_coverage(tier, date, 'evening', users, schedule, daily_assignments, morning_assigned)
     
     def attempt_fallback_coverage(self, tier: str, date: datetime.date, shift: str, 
                                  users: List[str], schedule: Dict, daily_assignments: Dict,
@@ -958,12 +1223,44 @@ class OnCallScheduler:
     def print_fairness_report(self, year=None, month=None):
         """Print a report showing shift distribution and coverage issues"""
         
-        # Print PTO Summary first
+        # Print Requested Shifts Summary (MANDATORY)
+        if self.shift_preferences:
+            print("\n=== MANDATORY Requested Shifts Summary ===")
+            total_preferences = sum(len(prefs) for prefs in self.shift_preferences.values())
+            
+            if self.honored_preferences:
+                print(f"✅ Assigned {len(self.honored_preferences)} of {total_preferences} requested shifts:")
+                for user, date, tier, shift in self.honored_preferences[:10]:  # Show first 10
+                    print(f"  • {user}: {date.strftime('%m/%d')} {tier} {shift} [MANDATORY]")
+                if len(self.honored_preferences) > 10:
+                    print(f"  ... and {len(self.honored_preferences) - 10} more")
+            
+            # Check for unmet preferences (should not happen as they're mandatory)
+            all_preferences = []
+            for user, prefs in self.shift_preferences.items():
+                for pref_date, pref_tier, pref_shift in prefs:
+                    if year and month and pref_date.year == year and pref_date.month == month:
+                        all_preferences.append((user, pref_date, pref_tier, pref_shift))
+            
+            unmet = []
+            for pref in all_preferences:
+                if pref not in self.honored_preferences:
+                    unmet.append(pref)
+            
+            if unmet:
+                print(f"⚠️  WARNING: {len(unmet)} requested shifts could not be assigned (conflicts or PTO):")
+                for user, date, tier, shift in unmet[:5]:  # Show first 5
+                    print(f"  • {user}: {date.strftime('%m/%d')} {tier} {shift} - CHECK FOR CONFLICTS")
+                if len(unmet) > 5:
+                    print(f"  ... and {len(unmet) - 5} more")
+            
+            print("-" * 40)
+        
+        # Print PTO Summary
         if year and month and self.pto_dates:
             print("\n=== PTO Summary ===")
             all_users = set(self.tier2_users + self.tier3_users + self.upgrade_users)
             users_with_pto = []
-            excluded_from_fairness = []
             
             for user in sorted(all_users):
                 if user in self.pto_dates:
@@ -971,20 +1268,16 @@ class OnCallScheduler:
                                   if date.year == year and date.month == month)
                     if pto_count > 0:
                         users_with_pto.append((user, pto_count))
-                        # Track users excluded from fairness metrics (>2 PTO days)
-                        if pto_count > 2:
-                            excluded_from_fairness.append(user)
             
             if users_with_pto:
                 print(f"Users with PTO in {month}/{year}:")
                 for user, days in sorted(users_with_pto, key=lambda x: x[1], reverse=True):
-                    fairness_note = " [Excluded from fairness metrics]" if user in excluded_from_fairness else ""
-                    print(f"  • {user}: {days} days{fairness_note}")
+                    available = self.get_user_available_days(user, year, month)
+                    print(f"  • {user}: {days} PTO days ({available} available days)")
             else:
                 print("No users have PTO this month")
             
-            if excluded_from_fairness:
-                print(f"\n📊 Users with >2 PTO days are excluded from fairness comparisons")
+            print(f"\n📊 Fairness is based on workload percentage (shifts ÷ available days)")
             print("-" * 40)
         
         # Print coverage warnings if any
@@ -999,8 +1292,8 @@ class OnCallScheduler:
                 print(f"  - {fb['date']}: {fb['tier']} {fb['shift']} -> {fb['user']} ({fb['reason']})")
         
         print("\n=== Shift Distribution Report ===")
-        print(f"{'User':<20} {'Month':<10} {'Cumulative':<12} {'Weekly':<10} {'Type'}")
-        print("-" * 60)
+        print(f"{'User':<20} {'Month':<8} {'Workload':<12} {'Cumulative':<12} {'Weekly':<8} {'Notes'}")
+        print("-" * 75)
         
         # Separate by user type
         tier2_counts = {u: self.shift_counts[u] for u in self.tier2_users if u in self.shift_counts}
@@ -1027,7 +1320,19 @@ class OnCallScheduler:
                     pto_note = ""
                 weekly_count = self.monthly_weekly_assignments.get(user, 0)
                 cumulative = self.cumulative_shift_counts.get(user, 0) + count
-                print(f"{user:<20} {count:<10} {cumulative:<12} {weekly_count:<10}{pto_note}")
+                
+                # Calculate workload percentage
+                if year and month:
+                    available_days = self.get_user_available_days(user, year, month)
+                    if available_days > 0:
+                        workload_pct = (count / available_days) * 100
+                        workload_str = f"{workload_pct:.1f}%"
+                    else:
+                        workload_str = "N/A"
+                else:
+                    workload_str = ""
+                
+                print(f"{user:<20} {count:<8} {workload_str:<12} {cumulative:<12} {weekly_count:<8}{pto_note}")
             if all_tier2:
                 avg = sum(all_tier2.values()) / len(all_tier2)
                 # Calculate cumulative average
@@ -1055,7 +1360,19 @@ class OnCallScheduler:
                     pto_note = ""
                 weekly_count = self.monthly_weekly_assignments.get(user, 0)
                 cumulative = self.cumulative_shift_counts.get(user, 0) + count
-                print(f"{user:<20} {count:<10} {cumulative:<12} {weekly_count:<10}{pto_note}")
+                
+                # Calculate workload percentage
+                if year and month:
+                    available_days = self.get_user_available_days(user, year, month)
+                    if available_days > 0:
+                        workload_pct = (count / available_days) * 100
+                        workload_str = f"{workload_pct:.1f}%"
+                    else:
+                        workload_str = "N/A"
+                else:
+                    workload_str = ""
+                
+                print(f"{user:<20} {count:<8} {workload_str:<12} {cumulative:<12} {weekly_count:<8}{pto_note}")
             if all_tier3:
                 avg = sum(all_tier3.values()) / len(all_tier3)
                 # Calculate cumulative average
@@ -1083,7 +1400,19 @@ class OnCallScheduler:
                     pto_note = ""
                 weekly_count = self.monthly_weekly_assignments.get(user, 0)
                 cumulative = self.cumulative_shift_counts.get(user, 0) + count
-                print(f"{user:<20} {count:<10} {cumulative:<12} {weekly_count:<10}{pto_note}")
+                
+                # Calculate workload percentage
+                if year and month:
+                    available_days = self.get_user_available_days(user, year, month)
+                    if available_days > 0:
+                        workload_pct = (count / available_days) * 100
+                        workload_str = f"{workload_pct:.1f}%"
+                    else:
+                        workload_str = "N/A"
+                else:
+                    workload_str = ""
+                
+                print(f"{user:<20} {count:<8} {workload_str:<12} {cumulative:<12} {weekly_count:<8}{pto_note}")
             if all_upgrade:
                 avg = sum(all_upgrade.values()) / len(all_upgrade)
                 # Calculate cumulative average
@@ -1579,20 +1908,36 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             
             if (ptoUsers.size === 0) return;
             
-            container.innerHTML = '<h3>Enter PTO dates:</h3>';
-            container.innerHTML += '<p style="font-size: 14px; color: #666;">Format: MM/DD/YYYY or DD/MM/YYYY (auto-detected)<br>';
+            container.innerHTML = '<h3>Enter PTO dates and Requested Shifts:</h3>';
+            container.innerHTML += '<p style="font-size: 14px; color: #666;">PTO Format: MM/DD/YYYY or DD/MM/YYYY (auto-detected)<br>';
             container.innerHTML += 'Examples: 03/15/2024-03/20/2024 or 15/03/2024-20/03/2024<br>';
-            container.innerHTML += 'Multiple ranges: Use commas to separate (e.g., 03/01/2024-03/05/2024, 03/15/2024-03/20/2024)</p>';
+            container.innerHTML += 'Multiple ranges: Use commas to separate</p>';
+            container.innerHTML += '<p style="font-size: 14px; color: #666; margin-top: 10px;">Requested Shifts Format: tier2am-MM/DD/YYYY, tier2pm-MM/DD/YYYY, tier3am-MM/DD/YYYY, tier3pm-MM/DD/YYYY, upgrade-MM/DD/YYYY<br>';
+            container.innerHTML += '<strong style="color: #d9534f;">⚠️ Requested shifts are MANDATORY and will be assigned unless PTO or conflict</strong></p>';
             
             Array.from(ptoUsers).sort().forEach(user => {
                 const div = document.createElement('div');
                 div.id = `dates-${user}`;
-                div.style.marginBottom = '15px';
+                div.style.marginBottom = '20px';
+                div.style.padding = '10px';
+                div.style.backgroundColor = '#f8f9fa';
+                div.style.borderRadius = '5px';
                 div.innerHTML = `
-                    <label style="display: inline-block; width: 100px; vertical-align: top;">${user}:</label>
-                    <textarea id="pto-range-${user}" 
-                             placeholder="01/03/2024-05/03/2024, 15/03/2024-20/03/2024" 
-                             style="width: 400px; height: 60px; vertical-align: top;"></textarea>
+                    <label style="display: inline-block; width: 100px; vertical-align: top; font-weight: bold;">${user}:</label>
+                    <div style="display: inline-block; vertical-align: top;">
+                        <div style="margin-bottom: 10px;">
+                            <label style="display: inline-block; width: 120px;">PTO Dates:</label>
+                            <textarea id="pto-range-${user}" 
+                                     placeholder="03/01/2024-03/05/2024, 03/15/2024-03/20/2024" 
+                                     style="width: 400px; height: 50px; vertical-align: top;"></textarea>
+                        </div>
+                        <div>
+                            <label style="display: inline-block; width: 120px;">Requested Shifts:</label>
+                            <textarea id="requests-${user}" 
+                                     placeholder="tier2am-03/15/2024, tier3pm-03/20/2024, upgrade-03/25/2024" 
+                                     style="width: 400px; height: 50px; vertical-align: top;"></textarea>
+                        </div>
+                    </div>
                 `;
                 container.appendChild(div);
             });
@@ -1614,6 +1959,15 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 }
             });
             
+            // Collect requested shifts data
+            const requestsData = {};
+            ptoUsers.forEach(user => {
+                const requests = document.getElementById(`requests-${user}`).value;
+                if (requests) {
+                    requestsData[user] = requests;
+                }
+            });
+            
             document.getElementById('calendar').innerHTML = '<div class="loading">Generating schedule...</div>';
             
             fetch('/generate', {
@@ -1621,7 +1975,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     month_year: monthYear,
-                    pto: ptoData
+                    pto: ptoData,
+                    preferences: requestsData
                 })
             })
             .then(response => response.json())
@@ -1859,6 +2214,7 @@ def generate():
     data = request.json
     month_year = data['month_year']
     pto_data = data.get('pto', {})
+    preference_data = data.get('preferences', {})  # Now just strings like PTO
     
     try:
         month, year = month_year.split('/')
@@ -1867,8 +2223,14 @@ def generate():
     except:
         return jsonify({'error': 'Invalid month/year format'})
     
-    # Clear previous PTO data
+    # Clear previous PTO and preference data
     scheduler.pto_dates.clear()
+    scheduler.shift_preferences.clear()
+    
+    # Parse preferences (similar to PTO parsing)
+    for user, pref_string in preference_data.items():
+        if pref_string:
+            scheduler.parse_preference_string(user, pref_string)
     
     # Parse PTO dates - now handles multiple ranges per user
     parsing_errors = []
