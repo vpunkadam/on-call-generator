@@ -397,6 +397,39 @@ class OnCallScheduler:
                         f"{user} has back-to-back {tier} assignments (weeks of {week1_start.strftime('%Y-%m-%d')} and {week2_start.strftime('%Y-%m-%d')})"
                     )
         
+        # Validation 7: Check for back-to-back Tier 2 daily shifts
+        tier2_consecutive = defaultdict(list)
+        sorted_dates = sorted(schedule.keys())
+        
+        for i in range(len(sorted_dates) - 1):
+            date = sorted_dates[i]
+            next_date = sorted_dates[i + 1]
+            
+            # Check if dates are consecutive
+            if (next_date - date).days == 1:
+                if date in schedule and 'tier2' in schedule[date] and next_date in schedule and 'tier2' in schedule[next_date]:
+                    # Check each shift
+                    for shift in ['morning', 'evening']:
+                        if shift in schedule[date]['tier2'] and shift in schedule[next_date]['tier2']:
+                            user_today = schedule[date]['tier2'][shift].split(' (')[0]
+                            user_tomorrow = schedule[next_date]['tier2'][shift].split(' (')[0]
+                            
+                            if user_today == user_tomorrow:
+                                tier2_consecutive[user_today].append((date, next_date, shift))
+        
+        # Report back-to-back Tier 2 shifts
+        for user, occurrences in tier2_consecutive.items():
+            if len(occurrences) == 1:
+                date1, date2, shift = occurrences[0]
+                validation_errors['info'].append(
+                    f"{user} has back-to-back tier2 {shift} shifts on {date1.strftime('%Y-%m-%d')} and {date2.strftime('%Y-%m-%d')} (avoided when possible)"
+                )
+            elif len(occurrences) > 1:
+                # Multiple back-to-back occurrences is more concerning
+                validation_errors['warnings'].append(
+                    f"{user} has {len(occurrences)} instances of back-to-back tier2 shifts"
+                )
+        
         # Print validation summary
         if validation_errors['critical'] or validation_errors['warnings'] or validation_errors['info']:
             print("\n=== Schedule Validation Report ===")
@@ -781,11 +814,30 @@ class OnCallScheduler:
                          and u not in daily_assignments[date]]
         
         if len(available_users) >= 2:
-            # Sort by CUMULATIVE shift count (ascending) to prioritize users with fewer historical shifts
-            # This ensures long-term fairness across months
-            available_users.sort(key=lambda u: self.cumulative_shift_counts[u] + self.shift_counts[u])
+            # Check who was assigned yesterday (for Tier 2 only, to avoid back-to-back)
+            yesterday_users = set()
+            if tier == 'tier2':
+                yesterday = date - datetime.timedelta(days=1)
+                if yesterday in schedule and 'tier2' in schedule[yesterday]:
+                    for shift in ['morning', 'evening']:
+                        if shift in schedule[yesterday]['tier2']:
+                            user = schedule[yesterday]['tier2'][shift]
+                            # Strip any tags like (DOUBLE) or (EMERGENCY)
+                            base_user = user.split(' (')[0] if ' (' in user else user
+                            yesterday_users.add(base_user)
             
-            # Assign the two users with the least shifts
+            # Sort by CUMULATIVE shift count (ascending) to prioritize users with fewer historical shifts
+            # But also consider back-to-back assignments for Tier 2
+            def sort_key(user):
+                base_score = self.cumulative_shift_counts[user] + self.shift_counts[user]
+                # Add penalty if user worked yesterday (for Tier 2)
+                if user in yesterday_users:
+                    base_score += 100  # Large penalty to push them down the list
+                return base_score
+            
+            available_users.sort(key=sort_key)
+            
+            # Assign the two users with the best scores (least shifts, not yesterday)
             schedule[date][tier]['morning'] = available_users[0]
             schedule[date][tier]['evening'] = available_users[1]
             daily_assignments[date].add(available_users[0])

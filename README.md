@@ -11,7 +11,8 @@ A Python-based web application for generating fair and balanced on-call schedule
   
 - **Fair Rotation Algorithm**: 
   - Ensures equitable distribution of shifts among team members
-  - Prevents back-to-back weekly assignments
+  - Prevents back-to-back weekly assignments (Tier 3/Upgrade)
+  - Prevents back-to-back daily assignments (Tier 2) when possible
   - Prioritizes users with fewer total shifts for fairness
   - Enforces "everyone gets 1 before anyone gets 2" rule for weekly shifts
   - Maximum 2 weekly shifts per user per month
@@ -87,7 +88,7 @@ The application will:
 1. Start a local web server on port 5000
 2. Automatically open your default browser to `http://127.0.0.1:5000`
 3. Display the web interface for schedule generation
-4. Load any existing shift history from `shift_history.json` if present
+4. Load any existing shift history from `cumulative_shift_history.json` if present
 
 ### Loading Users
 
@@ -162,6 +163,7 @@ Examples:
 ### Daily Assignments (Tier 2)
 - Assigned on a per-day basis
 - Algorithm prioritizes users with fewer total shifts
+- Avoids back-to-back assignments (same user on consecutive days) when possible
 - Ensures balanced distribution across the month
 - Tracks cumulative shifts across months for long-term fairness
 
